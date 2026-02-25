@@ -25,6 +25,10 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# URL для вебхука
+BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dp-sbor-miniapp-bot.onrender.com')
+WEBHOOK_URL = f"{BASE_URL}/webhook"
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def parse_contact(contact_json):
     """Преобразует JSON-строку contact в словарь"""
@@ -82,10 +86,9 @@ def save_order(order_data: dict):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             items_json = json.dumps(order_data['items'])
-            # Формируем contact JSON
             contact = {
                 'name': order_data['buyer_name'],
-                'phone': '0000000000',          # можно расширить позже
+                'phone': '0000000000',
                 'address': order_data['address'],
                 'paymentMethod': order_data['payment_method'],
                 'deliveryType': order_data['delivery_type']
@@ -251,11 +254,9 @@ def handle_seller_message(message):
             bot.reply_to(message, "❌ Этот заказ не ваш.")
             return
 
-        # Сохраняем сообщение в историю
         save_message(order['id'], user_id, 'seller', reply_text)
         logger.info(f"Сообщение от продавца сохранено для заказа {order_num}")
 
-        # Отправляем покупателю
         try:
             bot.send_message(
                 order['user_id'],
@@ -265,7 +266,6 @@ def handle_seller_message(message):
         except Exception as e:
             logger.error(f"Ошибка отправки покупателю: {e}")
 
-        # Копия админу
         if ADMIN_ID:
             try:
                 bot.send_message(
@@ -305,11 +305,9 @@ def handle_seller_complete(call):
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
 
-    # Завершаем заказ
     complete_order(order['id'])
     logger.info(f"Заказ {order_num} завершён в БД")
 
-    # Уведомляем покупателя
     try:
         bot.send_message(
             order['user_id'],
@@ -319,7 +317,6 @@ def handle_seller_complete(call):
     except Exception as e:
         logger.error(f"Ошибка уведомления покупателя: {e}")
 
-    # Уведомляем админа
     if ADMIN_ID:
         try:
             bot.send_message(
@@ -329,7 +326,6 @@ def handle_seller_complete(call):
         except Exception as e:
             logger.error(f"Ошибка уведомления админа: {e}")
 
-    # Убираем кнопки из сообщения продавца
     try:
         bot.edit_message_reply_markup(
             user_id,
@@ -347,11 +343,20 @@ def handle_seller_complete(call):
 def fallback_handler(message):
     bot.reply_to(message, "Используйте кнопки или начните новый заказ в нашем мини-аппе.")
 
-# ==================== FLASK-ЭНДПОИНТ ====================
+# ==================== FLASK-ЭНДПОИНТЫ ====================
 
 @app.route('/')
 def index():
     return '🤖 Бот работает'
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    return 'Bad Request', 400
 
 @app.route('/api/new-order', methods=['POST'])
 def new_order():
@@ -446,6 +451,10 @@ def new_order():
         logger.exception("Ошибка в /api/new-order")
         return jsonify({'error': str(e)}), 500
 
+# ==================== ЗАПУСК ====================
+
 if __name__ == '__main__':
     bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
