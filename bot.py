@@ -81,12 +81,11 @@ def save_order(order_data: dict):
     """Сохраняет заказ в таблицу orders и возвращает его ID"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # items преобразуем в JSON-строку
             items_json = json.dumps(order_data['items'])
             # Формируем contact JSON
             contact = {
                 'name': order_data['buyer_name'],
-                'phone': '0000000000',  # в миниаппе всегда так, можно при желании передавать
+                'phone': '0000000000',          # можно расширить позже
                 'address': order_data['address'],
                 'paymentMethod': order_data['payment_method'],
                 'deliveryType': order_data['delivery_type']
@@ -147,7 +146,8 @@ def complete_order(order_id: int):
     """Отмечает заказ как завершённый"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE orders SET status = 'completed', completed_at = %s WHERE id = %s", (datetime.utcnow().isoformat(), order_id))
+            cur.execute("UPDATE orders SET status = 'completed', completed_at = %s WHERE id = %s",
+                        (datetime.utcnow().isoformat(), order_id))
             conn.commit()
 
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
@@ -197,6 +197,7 @@ def handle_buyer_message(message):
                 seller['telegram_id'],
                 f"💬 Сообщение от покупателя (заказ {order['order_number']}):\n\n{message.text}"
             )
+            logger.info(f"Сообщение покупателя переслано продавцу {seller['telegram_id']}")
         except Exception as e:
             logger.error(f"Ошибка отправки продавцу: {e}")
 
@@ -213,6 +214,7 @@ def handle_buyer_message(message):
 def handle_seller_message(message):
     user_id = message.from_user.id
     text = message.text.strip()
+    logger.info(f"Сообщение от продавца {user_id}: {text}")
 
     if not text.startswith('#'):
         seller = get_seller_by_telegram_id(user_id)
@@ -249,26 +251,34 @@ def handle_seller_message(message):
             bot.reply_to(message, "❌ Этот заказ не ваш.")
             return
 
+        # Сохраняем сообщение в историю
         save_message(order['id'], user_id, 'seller', reply_text)
+        logger.info(f"Сообщение от продавца сохранено для заказа {order_num}")
 
+        # Отправляем покупателю
         try:
             bot.send_message(
                 order['user_id'],
                 f"💬 Сообщение от продавца (заказ {order_num}):\n\n{reply_text}"
             )
+            logger.info(f"Сообщение отправлено покупателю {order['user_id']}")
         except Exception as e:
             logger.error(f"Ошибка отправки покупателю: {e}")
 
+        # Копия админу
         if ADMIN_ID:
-            bot.send_message(
-                ADMIN_ID,
-                f"📩 [Копия] Продавец {seller['name']} (заказ {order_num}):\n{reply_text}"
-            )
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"📩 [Копия] Продавец {seller['name']} (заказ {order_num}):\n{reply_text}"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки админу: {e}")
 
         bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).")
 
     except Exception as e:
-        logger.error(f"Ошибка обработки сообщения продавца: {e}")
+        logger.error(f"Ошибка обработки сообщения продавца: {e}", exc_info=True)
         bot.reply_to(message, "❌ Ошибка. Используйте формат: #А1 текст сообщения")
 
 # ----- КНОПКА ДЛЯ ПРОДАВЦА (ТОЛЬКО ЗАВЕРШИТЬ) -----
@@ -276,19 +286,28 @@ def handle_seller_message(message):
 def handle_seller_complete(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[1]
+    logger.info(f"Продавец {user_id} нажал завершить для заказа {order_num}")
 
     order = get_order_by_number(order_num)
     if not order:
+        logger.error(f"Заказ {order_num} не найден")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
 
     seller = get_seller_by_telegram_id(user_id)
-    if not seller or order['seller_id'] != seller['id']:
-        bot.answer_callback_query(call.id, "❌ Заказ не ваш")
+    if not seller:
+        logger.error(f"Пользователь {user_id} не является продавцом")
+        bot.answer_callback_query(call.id, "❌ Вы не продавец")
         return
 
+    if order['seller_id'] != seller['id']:
+        logger.error(f"Заказ {order_num} принадлежит продавцу {order['seller_id']}, а не {seller['id']}")
+        bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
+        return
+
+    # Завершаем заказ
     complete_order(order['id'])
-    bot.answer_callback_query(call.id, "✅ Заказ завершён")
+    logger.info(f"Заказ {order_num} завершён в БД")
 
     # Уведомляем покупателя
     try:
@@ -296,15 +315,19 @@ def handle_seller_complete(call):
             order['user_id'],
             f"✅ Ваш заказ {order_num} выполнен. Спасибо за покупку!"
         )
+        logger.info(f"Уведомление отправлено покупателю {order['user_id']}")
     except Exception as e:
         logger.error(f"Ошибка уведомления покупателя: {e}")
 
     # Уведомляем админа
     if ADMIN_ID:
-        bot.send_message(
-            ADMIN_ID,
-            f"✅ Продавец {seller['name']} завершил заказ {order_num}."
-        )
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                f"✅ Продавец {seller['name']} завершил заказ {order_num}."
+            )
+        except Exception as e:
+            logger.error(f"Ошибка уведомления админа: {e}")
 
     # Убираем кнопки из сообщения продавца
     try:
@@ -313,8 +336,11 @@ def handle_seller_complete(call):
             call.message.message_id,
             reply_markup=None
         )
-    except:
-        pass
+        logger.info(f"Кнопки убраны у продавца {user_id}")
+    except Exception as e:
+        logger.error(f"Не удалось убрать кнопки: {e}")
+
+    bot.answer_callback_query(call.id, "✅ Заказ завершён")
 
 # ----- ОСТАЛЬНЫЕ ПОЛЬЗОВАТЕЛИ -----
 @bot.message_handler(func=lambda m: True)
@@ -373,6 +399,7 @@ def new_order():
         }
 
         order_id = save_order(order_data)
+        logger.info(f"Заказ {order_number} сохранён с ID {order_id}")
 
         items_text = "\n".join([
             f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
@@ -395,21 +422,24 @@ def new_order():
                 parse_mode='Markdown',
                 reply_markup=markup
             )
+            logger.info(f"Уведомление отправлено продавцу {seller_tg}")
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
 
         if ADMIN_ID:
-            bot.send_message(
-                ADMIN_ID,
-                f"🆕 *Новый заказ {order_number}*\n"
-                f"Продавец: {seller['name']}\n"
-                f"Покупатель: {buyer_name}\n"
-                f"Адрес: {address}\n"
-                f"Сумма: {total} руб.",
-                parse_mode='Markdown'
-            )
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🆕 *Новый заказ {order_number}*\n"
+                    f"Продавец: {seller['name']}\n"
+                    f"Покупатель: {buyer_name}\n"
+                    f"Адрес: {address}\n"
+                    f"Сумма: {total} руб.",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка уведомления админа: {e}")
 
-        logger.info(f"Заказ {order_number} сохранён и отправлен продавцу {seller['name']}")
         return jsonify({'status': 'ok', 'orderNumber': order_number})
 
     except Exception as e:
