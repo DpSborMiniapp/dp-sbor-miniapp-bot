@@ -367,16 +367,20 @@ def new_order():
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        # ========== НОВАЯ ПРОВЕРКА ==========
+        # ========== КЛЮЧЕВАЯ ПРОВЕРКА С ЛОГИРОВАНИЕМ ==========
         if request_id:
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT order_number FROM orders WHERE request_id = %s", (request_id,))
-                    existing = cur.fetchone()
-                    if existing:
-                        logger.info(f"Заказ с request_id {request_id} уже существует, номер {existing['order_number']}")
-                        return jsonify({'status': 'ok', 'orderNumber': existing['order_number']}), 200
-        # =====================================
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT order_number FROM orders WHERE request_id = %s", (request_id,))
+                        existing = cur.fetchone()
+                        if existing:
+                            logger.info(f"ЗАКАЗ УЖЕ СУЩЕСТВУЕТ: request_id={request_id}, номер={existing['order_number']}")
+                            return jsonify({'status': 'ok', 'orderNumber': existing['order_number']}), 200
+            except Exception as e:
+                logger.error(f"Ошибка при проверке request_id: {e}")
+                # Если ошибка базы, лучше продолжить, чтобы попытаться создать заказ
+        # =====================================================
 
         seller = get_seller_by_address(address)
         if not seller:
@@ -506,4 +510,3 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
-
