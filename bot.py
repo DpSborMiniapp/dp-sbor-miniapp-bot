@@ -9,7 +9,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
-# ==================== НАСТРОЙКА ====================
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -28,7 +27,6 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dp-sbor-miniapp-bot.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def parse_contact(contact_json):
     if isinstance(contact_json, dict):
         return contact_json
@@ -44,8 +42,6 @@ def parse_items(items_json):
         return json.loads(items_json)
     except:
         return []
-
-# ==================== ФУНКЦИИ РАБОТЫ С БАЗОЙ ====================
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -153,8 +149,6 @@ def get_seller_by_telegram_id(telegram_id: int):
 
 def is_admin(telegram_id: int) -> bool:
     return telegram_id == ADMIN_ID
-
-# ==================== ОБРАБОТЧИКИ TELEGRAM ====================
 
 def main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -289,12 +283,10 @@ def handle_seller_complete(call):
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
 
-    # Проверяем статус заказа
-    current_status = order['status']
-    if current_status not in ('active', 'Активный'):
-        logger.error(f"Заказ {order_num} уже не активен (статус: {current_status})")
+    # Проверяем статус
+    if order['status'] not in ('active', 'Активный'):
+        logger.error(f"Заказ {order_num} уже не активен (статус: {order['status']})")
         bot.answer_callback_query(call.id, f"❌ Заказ уже не активен")
-        # Убираем кнопки, так как заказ уже не активен
         try:
             bot.edit_message_reply_markup(
                 user_id,
@@ -305,7 +297,6 @@ def handle_seller_complete(call):
             pass
         return
 
-    # Завершаем заказ
     complete_order(order['id'])
     logger.info(f"Заказ {order_num} завершён в БД")
 
@@ -342,8 +333,6 @@ def handle_seller_complete(call):
 @bot.message_handler(func=lambda m: True)
 def fallback_handler(message):
     bot.send_message(message.chat.id, "Используйте кнопки или начните новый заказ в нашем мини-аппе.", reply_markup=main_keyboard())
-
-# ==================== FLASK-ЭНДПОИНТЫ ====================
 
 @app.route('/')
 def index():
@@ -469,17 +458,17 @@ def order_cancelled():
         seller_id = data.get('sellerId')
 
         if not all([order_id, seller_id]):
+            logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}")
             return jsonify({'error': 'Missing fields'}), 400
 
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT order_number, status FROM orders WHERE id = %s", (order_id,))
+                cur.execute("SELECT order_number FROM orders WHERE id = %s", (order_id,))
                 order = cur.fetchone()
                 if not order:
                     return jsonify({'error': 'Order not found'}), 404
 
                 order_number = order['order_number']
-                order_status = order['status']
 
                 cur.execute("SELECT telegram_id FROM sellers WHERE id = %s", (seller_id,))
                 seller = cur.fetchone()
@@ -488,17 +477,12 @@ def order_cancelled():
 
                 seller_tg = seller['telegram_id']
 
-        # Отправляем сообщение продавцу об отмене
-        try:
-            bot.send_message(
-                seller_tg,
-                f"❌ *Заказ {order_number} отменён покупателем.*",
-                parse_mode='Markdown'
-            )
-            logger.info(f"Уведомление об отмене заказа {order_number} отправлено продавцу {seller_tg}")
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления об отмене: {e}")
-
+        bot.send_message(
+            seller_tg,
+            f"❌ *Заказ {order_number} отменён покупателем.*",
+            parse_mode='Markdown'
+        )
+        logger.info(f"Уведомление об отмене заказа {order_number} отправлено продавцу {seller_tg}")
         return jsonify({'status': 'ok'})
 
     except Exception as e:
