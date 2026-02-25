@@ -28,14 +28,11 @@ logger = logging.getLogger(__name__)
 # ==================== ФУНКЦИИ РАБОТЫ С БАЗОЙ ====================
 
 def get_db_connection():
-    """Возвращает соединение с PostgreSQL"""
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def get_seller_by_address(address: str):
-    """Возвращает продавца по адресу самовывоза"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Ищем адрес в таблице pickup_locations
             cur.execute("SELECT seller_id FROM pickup_locations WHERE address = %s", (address,))
             addr = cur.fetchone()
             if not addr or not addr['seller_id']:
@@ -45,7 +42,6 @@ def get_seller_by_address(address: str):
             return cur.fetchone()
 
 def generate_order_number(seller_name: str):
-    """Генерирует номер заказа вида А1, Е2 и т.д."""
     first_letter = seller_name[0].upper()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -61,14 +57,13 @@ def generate_order_number(seller_name: str):
             return f"{first_letter}{new_counter}"
 
 def save_order(order_data: dict):
-    """Сохраняет заказ в таблицу orders и возвращает его ID"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Преобразуем items в JSON-строку
             order_data['items'] = json.dumps(order_data['items'])
+            # ИЗМЕНЕНО: buyer_id -> user_id
             cur.execute("""
-                INSERT INTO orders (order_number, buyer_id, buyer_name, seller_id, address_id, items, total, payment_method, delivery_type, status)
-                VALUES (%(order_number)s, %(buyer_id)s, %(buyer_name)s, %(seller_id)s, %(address_id)s, %(items)s, %(total)s, %(payment_method)s, %(delivery_type)s, %(status)s)
+                INSERT INTO orders (order_number, user_id, buyer_name, seller_id, address_id, items, total, payment_method, delivery_type, status)
+                VALUES (%(order_number)s, %(user_id)s, %(buyer_name)s, %(seller_id)s, %(address_id)s, %(items)s, %(total)s, %(payment_method)s, %(delivery_type)s, %(status)s)
                 RETURNING id
             """, order_data)
             order_id = cur.fetchone()['id']
@@ -76,35 +71,31 @@ def save_order(order_data: dict):
             return order_id
 
 def get_active_order_by_buyer(buyer_id: int):
-    """Возвращает активный заказ покупателя (если есть)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM orders WHERE buyer_id = %s AND status = 'active'", (buyer_id,))
+            # ИЗМЕНЕНО: buyer_id -> user_id
+            cur.execute("SELECT * FROM orders WHERE user_id = %s AND status = 'active'", (buyer_id,))
             return cur.fetchone()
 
 def get_active_orders_by_seller(seller_id: int):
-    """Возвращает все активные заказы продавца"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE seller_id = %s AND status = 'active'", (seller_id,))
             return cur.fetchall()
 
 def get_order_by_number(order_number: str):
-    """Находит заказ по его номеру (например, А1)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
             return cur.fetchone()
 
 def complete_order(order_id: int):
-    """Отмечает заказ как завершённый"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE orders SET status = 'completed', completed_at = %s WHERE id = %s", (datetime.utcnow().isoformat(), order_id))
             conn.commit()
 
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
-    """Сохраняет сообщение в историю"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -114,7 +105,6 @@ def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
             conn.commit()
 
 def get_seller_by_telegram_id(telegram_id: int):
-    """Проверяет, является ли пользователь продавцом, и возвращает его данные"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM sellers WHERE telegram_id = %s", (telegram_id,))
@@ -129,7 +119,6 @@ def is_admin(telegram_id: int) -> bool:
 def handle_start(message):
     bot.reply_to(message, "👋 Добро пожаловать! Здесь будут ваши заказы и общение с продавцом.")
 
-# ----- ПОКУПАТЕЛИ -----
 @bot.message_handler(func=lambda m: get_active_order_by_buyer(m.from_user.id) is not None)
 def handle_buyer_message(message):
     user_id = message.from_user.id
@@ -161,7 +150,6 @@ def handle_buyer_message(message):
 
     bot.reply_to(message, "✅ Сообщение отправлено продавцу.")
 
-# ----- ПРОДАВЦЫ -----
 @bot.message_handler(func=lambda m: get_seller_by_telegram_id(m.from_user.id) is not None)
 def handle_seller_message(message):
     user_id = message.from_user.id
@@ -206,7 +194,7 @@ def handle_seller_message(message):
 
         try:
             bot.send_message(
-                order['buyer_id'],
+                order['user_id'],  # ИЗМЕНЕНО: buyer_id -> user_id
                 f"💬 Сообщение от продавца (заказ {order_num}):\n\n{reply_text}"
             )
         except Exception as e:
@@ -224,7 +212,6 @@ def handle_seller_message(message):
         logger.error(f"Ошибка обработки сообщения продавца: {e}")
         bot.reply_to(message, "❌ Ошибка. Используйте формат: #А1 текст сообщения")
 
-# ----- КНОПКА ДЛЯ ПРОДАВЦА (ТОЛЬКО ЗАВЕРШИТЬ) -----
 @bot.callback_query_handler(func=lambda call: call.data.startswith('complete_'))
 def handle_seller_complete(call):
     user_id = call.from_user.id
@@ -243,23 +230,20 @@ def handle_seller_complete(call):
     complete_order(order['id'])
     bot.answer_callback_query(call.id, "✅ Заказ завершён")
 
-    # Уведомляем покупателя
     try:
         bot.send_message(
-            order['buyer_id'],
+            order['user_id'],  # ИЗМЕНЕНО: buyer_id -> user_id
             f"✅ Ваш заказ {order_num} выполнен. Спасибо за покупку!"
         )
     except Exception as e:
         logger.error(f"Ошибка уведомления покупателя: {e}")
 
-    # Уведомляем админа
     if ADMIN_ID:
         bot.send_message(
             ADMIN_ID,
             f"✅ Продавец {seller['name']} завершил заказ {order_num}."
         )
 
-    # Убираем кнопки из сообщения продавца
     try:
         bot.edit_message_reply_markup(
             user_id,
@@ -269,12 +253,11 @@ def handle_seller_complete(call):
     except:
         pass
 
-# ----- ОСТАЛЬНЫЕ ПОЛЬЗОВАТЕЛИ -----
 @bot.message_handler(func=lambda m: True)
 def fallback_handler(message):
     bot.reply_to(message, "Используйте кнопки или начните новый заказ в нашем мини-аппе.")
 
-# ==================== FLASK-ЭНДПОИНТ ДЛЯ МИНИ-АППА ====================
+# ==================== FLASK-ЭНДПОИНТ ====================
 
 @app.route('/')
 def index():
@@ -287,6 +270,7 @@ def new_order():
         if not data:
             return jsonify({'error': 'No data'}), 400
 
+        # ИЗМЕНЕНО: userId -> user_id (но в переменной оставим buyer_id для читаемости)
         buyer_id = data.get('userId')
         buyer_name = data.get('name', 'Покупатель')
         items = data.get('items')
@@ -305,20 +289,20 @@ def new_order():
 
         order_number = generate_order_number(seller['name'])
 
-        # Получаем address_id
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM pickup_locations WHERE address = %s", (address,))
                 addr = cur.fetchone()
                 address_id = addr['id'] if addr else None
 
+        # ИЗМЕНЕНО: buyer_id -> user_id в ключе словаря
         order_data = {
             'order_number': order_number,
-            'buyer_id': buyer_id,
+            'user_id': buyer_id,          # ключ теперь user_id
             'buyer_name': buyer_name,
             'seller_id': seller['id'],
             'address_id': address_id,
-            'items': items,  # здесь items пока остаётся словарём, но в save_order будет преобразован
+            'items': items,
             'total': total,
             'payment_method': payment,
             'delivery_type': delivery,
@@ -327,14 +311,12 @@ def new_order():
 
         order_id = save_order(order_data)
 
-        # Формируем текст заказа для уведомления
         items_text = "\n".join([
             f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
             for item in items
         ])
         order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery}"
 
-        # Уведомление продавцу
         seller_tg = seller['telegram_id']
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
@@ -370,8 +352,6 @@ def new_order():
     except Exception as e:
         logger.exception("Ошибка в /api/new-order")
         return jsonify({'error': str(e)}), 500
-
-# ==================== ЗАПУСК ====================
 
 if __name__ == '__main__':
     bot.remove_webhook()
