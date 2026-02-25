@@ -57,6 +57,12 @@ def get_seller_by_address(address: str):
             cur.execute("SELECT * FROM sellers WHERE id = %s", (seller_id,))
             return cur.fetchone()
 
+def get_seller_by_telegram_id(telegram_id: int):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM sellers WHERE telegram_id = %s", (telegram_id,))
+            return cur.fetchone()
+
 def generate_order_number(prefix: str):
     first_letter = prefix[0].upper()
     with get_db_connection() as conn:
@@ -145,12 +151,6 @@ def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
             """, (order_id, sender_id, sender_role, text))
             conn.commit()
 
-def get_seller_by_telegram_id(telegram_id: int):
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM sellers WHERE telegram_id = %s", (telegram_id,))
-            return cur.fetchone()
-
 def is_admin(telegram_id: int) -> bool:
     return telegram_id == ADMIN_ID
 
@@ -204,15 +204,15 @@ def handle_buyer_message(message):
             except Exception as e:
                 logger.error(f"Ошибка отправки продавцу: {e}")
     else:
-        if ADMIN_ID:
-            try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"💬 Сообщение от покупателя (заказ {order['order_number']}, доставка):\n\n{message.text}"
-                )
-                logger.info(f"Сообщение покупателя переслано админу")
-            except Exception as e:
-                logger.error(f"Ошибка отправки админу: {e}")
+        # Если seller_id нет, значит это заказ с доставкой, отправляем админу
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                f"💬 Сообщение от покупателя (заказ {order['order_number']}, доставка):\n\n{message.text}"
+            )
+            logger.info(f"Сообщение покупателя переслано админу")
+        except Exception as e:
+            logger.error(f"Ошибка отправки админу: {e}")
 
     if ADMIN_ID and order['seller_id']:
         bot.send_message(
@@ -384,10 +384,9 @@ def new_order():
 
         logger.info(f"Получен запрос на новый заказ: delivery={delivery}, address={address}")
 
-        # Определяем тип доставки
         if delivery == 'courier':
             seller = None
-            logger.info("Заказ с доставкой, продавец не назначается")
+            logger.info("Заказ с доставкой, продавец не назначается, уведомление админу")
         else:
             seller = get_seller_by_address(address)
             if not seller:
@@ -411,7 +410,6 @@ def new_order():
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
                         if not existing['notified_bool']:
-                            # Отправляем уведомление
                             items_text = "\n".join([
                                 f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
                                 for item in items
