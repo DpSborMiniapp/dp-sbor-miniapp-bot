@@ -58,7 +58,6 @@ def get_seller_by_address(address: str):
             return cur.fetchone()
 
 def generate_order_number(seller_name: str):
-    """Генерирует номер заказа вида А1, Е2 и т.д. на основе максимального существующего номера для продавца"""
     first_letter = seller_name[0].upper()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -81,8 +80,8 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
             items_json = json.dumps(order_data['items'])
             contact_json = json.dumps(contact)
             cur.execute("""
-                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id, notified)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 order_data['order_number'],
@@ -93,7 +92,8 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
                 order_data['total'],
                 contact_json,
                 order_data['status'],
-                request_id
+                request_id,
+                False  # notified по умолчанию False
             ))
             order_id = cur.fetchone()['id']
             conn.commit()
@@ -370,38 +370,59 @@ def new_order():
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        # ========== УМНАЯ ОБРАБОТКА ДУБЛИКАТОВ ==========
-        if request_id:
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT id, order_number FROM orders WHERE request_id = %s", (request_id,))
-                    existing = cur.fetchone()
-                    if existing:
-                        # Если заказ уже есть, проверяем его номер
-                        if existing['order_number']:
-                            # Номер есть – возвращаем его
-                            logger.info(f"Найден существующий заказ с request_id {request_id}, номер {existing['order_number']}")
-                            return jsonify({'status': 'ok', 'orderNumber': existing['order_number']}), 200
-                        else:
-                            # Номера нет – генерируем новый и обновляем запись
-                            # Сначала нужно получить имя продавца по адресу (передаётся в запросе)
-                            seller = get_seller_by_address(address)
-                            if seller:
-                                new_order_number = generate_order_number(seller['name'])
-                                cur.execute("UPDATE orders SET order_number = %s WHERE id = %s", (new_order_number, existing['id']))
-                                conn.commit()
-                                logger.info(f"Обновлён заказ {existing['id']} с новым номером {new_order_number}")
-                                return jsonify({'status': 'ok', 'orderNumber': new_order_number}), 200
-                            else:
-                                logger.error("Не удалось найти продавца для обновления номера")
-                                return jsonify({'error': 'Seller not found'}), 404
-        # ===============================================
-
         seller = get_seller_by_address(address)
         if not seller:
             logger.error(f"Не найден продавец для адреса {address}")
             return jsonify({'error': 'Seller not found for this address'}), 404
 
+        # ========== УМНАЯ ОБРАБОТКА СУЩЕСТВУЮЩЕГО ЗАКАЗА ==========
+        if request_id:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id, order_number, notified FROM orders WHERE request_id = %s", (request_id,))
+                    existing = cur.fetchone()
+                    if existing:
+                        # Если заказ уже есть
+                        order_number = existing['order_number']
+                        if not order_number:
+                            # Нет номера – генерируем
+                            order_number = generate_order_number(seller['name'])
+                            cur.execute("UPDATE orders SET order_number = %s WHERE id = %s", (order_number, existing['id']))
+                            conn.commit()
+                            logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
+                        # Если уведомление ещё не отправлено (notified = False) – отправляем
+                        if not existing['notified']:
+                            # Формируем текст заказа
+                            items_text = "\n".join([
+                                f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
+                                for item in items
+                            ])
+                            order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery}"
+                            markup = types.InlineKeyboardMarkup()
+                            markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
+                            try:
+                                bot.send_message(
+                                    seller['telegram_id'],
+                                    f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
+                                    f"👤 Покупатель: {buyer_name}\n"
+                                    f"📍 {address}\n"
+                                    f"📝 {order_text}\n\n"
+                                    f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
+                                    parse_mode='Markdown',
+                                    reply_markup=markup
+                                )
+                                # Помечаем, что уведомление отправлено
+                                cur.execute("UPDATE orders SET notified = TRUE WHERE id = %s", (existing['id'],))
+                                conn.commit()
+                                logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']} для заказа {order_number}")
+                            except Exception as e:
+                                logger.error(f"Ошибка уведомления продавца: {e}")
+                        else:
+                            logger.info(f"Уведомление для заказа {order_number} уже было отправлено ранее")
+                        return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
+        # ===========================================================
+
+        # Создание нового заказа
         order_number = generate_order_number(seller['name'])
 
         with get_db_connection() as conn:
@@ -432,6 +453,7 @@ def new_order():
         order_id = save_order(order_data, contact, request_id)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id}")
 
+        # Отправляем уведомление продавцу и помечаем как отправленное
         items_text = "\n".join([
             f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
             for item in items
@@ -453,40 +475,17 @@ def new_order():
                 parse_mode='Markdown',
                 reply_markup=markup
             )
-            logger.info(f"Уведомление отправлено продавцу {seller_tg}")
-        except Exception as e:
-            logger.error(f"Ошибка увед ответить покупателю, используйте `#{order_number} текст`",
-                parse_mode='Markdown',
-                reply_markup=markup
-            )
+            # Обновляем notified
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE orders SET notified = TRUE WHERE id = %s", (order_id,))
+                    conn.commit()
             logger.info(f"Уведомление отправлено продавцу {seller_tg}")
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
 
         if ADMIN_ID:
             try:
-омления продавца: {e}")
-
-        if ADMIN_ID:
-            try:
-                bot.send_message(
-                    ADMIN_ID,
-                    f"🆕 *Новый заказ {order_number}*\n"
-                    f"Продавец: {seller['name']}\n"
-                    f"Покупатель: {buyer_name}\n"
-                    f"Адрес: {address}\n"
-                    f"Сумма: {total} руб.",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа: {e}")
-
-        return jsonify({'status': 'ok', 'orderNumber': order_number})
-
-    except Exception as e:
-        logger.exception("Ошибка в /api/new-order")
-        return jsonify({'error': str(e)}), 500
-
                 bot.send_message(
                     ADMIN_ID,
                     f"🆕 *Новый заказ {order_number}*\n"
@@ -516,32 +515,13 @@ def order_cancelled():
         user_id = data.get('userId')
         seller_id = data.get('sellerId')
 
-        if not all@app.route('/api/order-cancelled', methods=['POST'])
-def order_cancelled():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data'}), 400
-
-        order_id = data.get('orderId')
-        user_id = data.get('userId')
-        seller_id = data.get('sellerId')
-
         if not all([order_id, seller_id]):
             logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}")
             return jsonify({'error': 'Missing fields'}), 400
 
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT order([order_id, seller_id]):
-            logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}")
-            return jsonify({'error': 'Missing fields'}), 400
-
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
                 cur.execute("SELECT order_number FROM orders WHERE id = %s", (order_id,))
-                order = cur.fetchone()
-                if not_number FROM orders WHERE id = %s", (order_id,))
                 order = cur.fetchone()
                 if not order:
                     return jsonify({'error': 'Order not found'}), 404
