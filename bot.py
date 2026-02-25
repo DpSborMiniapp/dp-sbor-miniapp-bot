@@ -47,7 +47,6 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def get_seller_by_address(address: str):
-    """Возвращает продавца по адресу самовывоза (только для pickup)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT seller_id FROM pickup_locations WHERE address = %s", (address,))
@@ -59,7 +58,6 @@ def get_seller_by_address(address: str):
             return cur.fetchone()
 
 def generate_order_number(prefix: str):
-    """Генерирует номер заказа вида А1, К2 и т.д."""
     first_letter = prefix[0].upper()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -191,7 +189,6 @@ def handle_buyer_message(message):
 
     save_message(order['id'], user_id, 'buyer', message.text)
 
-    # Определяем, кому отправлять: если seller_id есть, то продавцу, иначе админу
     if order['seller_id']:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -217,7 +214,6 @@ def handle_buyer_message(message):
             except Exception as e:
                 logger.error(f"Ошибка отправки админу: {e}")
 
-    # Копия админу при самовывозе
     if ADMIN_ID and order['seller_id']:
         bot.send_message(
             ADMIN_ID,
@@ -252,7 +248,6 @@ def handle_seller_message(message):
             bot.reply_to(message, f"❌ Заказ {order_num} не найден.")
             return
 
-        # Проверка прав: админ может отвечать на любой заказ, продавец только на свои
         if not is_admin(user_id):
             seller = get_seller_by_telegram_id(user_id)
             if not seller or order['seller_id'] != seller['id']:
@@ -299,7 +294,6 @@ def handle_seller_complete(call):
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
 
-    # Проверка прав: админ может завершить любой заказ
     if not is_admin(user_id):
         seller = get_seller_by_telegram_id(user_id)
         if not seller or order['seller_id'] != seller['id']:
@@ -388,15 +382,18 @@ def new_order():
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
+        logger.info(f"Получен запрос на новый заказ: delivery={delivery}, address={address}")
+
         # Определяем тип доставки
         if delivery == 'courier':
             seller = None
-            # Для доставки адрес может быть любым, не ищем продавца
+            logger.info("Заказ с доставкой, продавец не назначается")
         else:
             seller = get_seller_by_address(address)
             if not seller:
                 logger.error(f"Не найден продавец для адреса {address}")
                 return jsonify({'error': 'Seller not found for this address'}), 404
+            logger.info(f"Найден продавец: {seller['name']} (id {seller['id']})")
 
         # Проверка существующего заказа по request_id
         if request_id:
@@ -405,6 +402,7 @@ def new_order():
                     cur.execute("SELECT id, order_number, notified_bool FROM orders WHERE request_id = %s", (request_id,))
                     existing = cur.fetchone()
                     if existing:
+                        logger.info(f"Найден существующий заказ с request_id {request_id}")
                         order_number = existing['order_number']
                         if not order_number:
                             prefix = seller['name'] if seller else "Курьер"
@@ -423,7 +421,6 @@ def new_order():
                             markup = types.InlineKeyboardMarkup()
                             markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
                             if seller:
-                                # Самовывоз – продавцу
                                 try:
                                     bot.send_message(
                                         seller['telegram_id'],
@@ -439,7 +436,6 @@ def new_order():
                                 except Exception as e:
                                     logger.error(f"Ошибка уведомления продавца: {e}")
                             else:
-                                # Доставка – админу
                                 try:
                                     bot.send_message(
                                         ADMIN_ID,
@@ -454,7 +450,6 @@ def new_order():
                                     logger.info(f"Уведомление отправлено админу")
                                 except Exception as e:
                                     logger.error(f"Ошибка уведомления админа: {e}")
-                            # Копия админу при самовывозе
                             if seller and ADMIN_ID:
                                 try:
                                     bot.send_message(
@@ -472,7 +467,7 @@ def new_order():
                             conn.commit()
                         return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
 
-        # Создание нового заказа
+        # Генерация номера для нового заказа
         if seller:
             order_number = generate_order_number(seller['name'])
             seller_id = seller['id']
@@ -480,7 +475,7 @@ def new_order():
             order_number = generate_order_number("Курьер")
             seller_id = None
 
-        # Получаем address_id (только для pickup, для доставки может быть NULL)
+        # Получаем address_id только для самовывоза
         address_id = None
         if seller:
             with get_db_connection() as conn:
@@ -488,6 +483,7 @@ def new_order():
                     cur.execute("SELECT id FROM pickup_locations WHERE address = %s", (address,))
                     addr = cur.fetchone()
                     address_id = addr['id'] if addr else None
+                    logger.info(f"address_id для {address}: {address_id}")
 
         if not contact:
             contact = {
@@ -509,7 +505,7 @@ def new_order():
         }
 
         order_id = save_order(order_data, contact, request_id)
-        logger.info(f"Заказ {order_number} сохранён с ID {order_id}")
+        logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller_id})")
 
         # Отправка уведомлений
         items_text = "\n".join([
@@ -538,7 +534,6 @@ def new_order():
                 logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}")
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
-            # Копия админу
             if ADMIN_ID:
                 try:
                     bot.send_message(
@@ -569,7 +564,6 @@ def new_order():
             except Exception as e:
                 logger.error(f"Ошибка уведомления админа: {e}")
 
-        # Помечаем как уведомлённое
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE orders SET notified_bool = TRUE WHERE id = %s", (order_id,))
