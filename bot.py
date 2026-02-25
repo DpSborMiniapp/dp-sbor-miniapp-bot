@@ -4,22 +4,21 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 import telebot
 from telebot import types
-from supabase import create_client
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
 # ==================== НАСТРОЙКА ====================
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+DATABASE_URL = os.getenv('DATABASE_URL')
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 PORT = int(os.getenv('PORT', 10000))
 
-if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
+if not BOT_TOKEN or not DATABASE_URL:
     raise ValueError("Не заданы обязательные переменные окружения")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO)
@@ -27,72 +26,97 @@ logger = logging.getLogger(__name__)
 
 # ==================== ФУНКЦИИ РАБОТЫ С БАЗОЙ ====================
 
+def get_db_connection():
+    """Возвращает соединение с PostgreSQL"""
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
 def get_seller_by_address(address: str):
     """Возвращает продавца по адресу самовывоза"""
-    # Ищем адрес в таблице pickup_locations по полю address_text
-    addr_res = supabase.table('pickup_locations').select('seller_id').eq('address_text', address).execute()
-    if not addr_res.data:
-        return None
-    seller_id = addr_res.data[0]['seller_id']
-    if not seller_id:
-        return None
-    seller_res = supabase.table('sellers').select('*').eq('id', seller_id).execute()
-    return seller_res.data[0] if seller_res.data else None
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Ищем адрес в таблице pickup_locations по полю address_text
+            cur.execute("SELECT seller_id FROM pickup_locations WHERE address_text = %s", (address,))
+            addr = cur.fetchone()
+            if not addr or not addr['seller_id']:
+                return None
+            seller_id = addr['seller_id']
+            cur.execute("SELECT * FROM sellers WHERE id = %s", (seller_id,))
+            return cur.fetchone()
 
 def generate_order_number(seller_name: str):
     """Генерирует номер заказа вида А1, Е2 и т.д."""
     first_letter = seller_name[0].upper()
-    # Получаем текущий счётчик для этой буквы
-    counter_res = supabase.table('order_counters').select('counter').eq('seller_letter', first_letter).execute()
-    if counter_res.data:
-        new_counter = counter_res.data[0]['counter'] + 1
-        supabase.table('order_counters').update({'counter': new_counter}).eq('seller_letter', first_letter).execute()
-    else:
-        new_counter = 1
-        supabase.table('order_counters').insert({'seller_letter': first_letter, 'counter': new_counter}).execute()
-    return f"{first_letter}{new_counter}"
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Получаем текущий счётчик
+            cur.execute("SELECT counter FROM order_counters WHERE seller_letter = %s", (first_letter,))
+            counter = cur.fetchone()
+            if counter:
+                new_counter = counter['counter'] + 1
+                cur.execute("UPDATE order_counters SET counter = %s WHERE seller_letter = %s", (new_counter, first_letter))
+            else:
+                new_counter = 1
+                cur.execute("INSERT INTO order_counters (seller_letter, counter) VALUES (%s, %s)", (first_letter, new_counter))
+            conn.commit()
+            return f"{first_letter}{new_counter}"
 
 def save_order(order_data: dict):
-    """Сохраняет заказ в таблицу orders и возвращает его"""
-    res = supabase.table('orders').insert(order_data).execute()
-    return res.data[0] if res.data else None
+    """Сохраняет заказ в таблицу orders и возвращает его ID"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO orders (order_number, buyer_id, buyer_name, seller_id, address_id, items, total, payment_method, delivery_type, status)
+                VALUES (%(order_number)s, %(buyer_id)s, %(buyer_name)s, %(seller_id)s, %(address_id)s, %(items)s, %(total)s, %(payment_method)s, %(delivery_type)s, %(status)s)
+                RETURNING id
+            """, order_data)
+            order_id = cur.fetchone()['id']
+            conn.commit()
+            return order_id
 
 def get_active_order_by_buyer(buyer_id: int):
     """Возвращает активный заказ покупателя (если есть)"""
-    res = supabase.table('orders').select('*').eq('buyer_id', buyer_id).eq('status', 'active').execute()
-    return res.data[0] if res.data else None
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM orders WHERE buyer_id = %s AND status = 'active'", (buyer_id,))
+            return cur.fetchone()
 
 def get_active_orders_by_seller(seller_id: int):
     """Возвращает все активные заказы продавца"""
-    res = supabase.table('orders').select('*').eq('seller_id', seller_id).eq('status', 'active').execute()
-    return res.data
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM orders WHERE seller_id = %s AND status = 'active'", (seller_id,))
+            return cur.fetchall()
 
 def get_order_by_number(order_number: str):
     """Находит заказ по его номеру (например, А1)"""
-    res = supabase.table('orders').select('*').eq('order_number', order_number).execute()
-    return res.data[0] if res.data else None
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
+            return cur.fetchone()
 
 def complete_order(order_id: int):
     """Отмечает заказ как завершённый"""
-    supabase.table('orders').update({
-        'status': 'completed',
-        'completed_at': datetime.utcnow().isoformat()
-    }).eq('id', order_id).execute()
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE orders SET status = 'completed', completed_at = %s WHERE id = %s", (datetime.utcnow().isoformat(), order_id))
+            conn.commit()
 
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
     """Сохраняет сообщение в историю"""
-    data = {
-        'order_id': order_id,
-        'sender_id': sender_id,
-        'sender_role': sender_role,
-        'text': text
-    }
-    supabase.table('messages').insert(data).execute()
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO messages (order_id, sender_id, sender_role, text)
+                VALUES (%s, %s, %s, %s)
+            """, (order_id, sender_id, sender_role, text))
+            conn.commit()
 
 def get_seller_by_telegram_id(telegram_id: int):
     """Проверяет, является ли пользователь продавцом, и возвращает его данные"""
-    res = supabase.table('sellers').select('*').eq('telegram_id', telegram_id).execute()
-    return res.data[0] if res.data else None
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM sellers WHERE telegram_id = %s", (telegram_id,))
+            return cur.fetchone()
 
 def is_admin(telegram_id: int) -> bool:
     return telegram_id == ADMIN_ID
@@ -106,7 +130,6 @@ def handle_start(message):
 # ----- ПОКУПАТЕЛИ -----
 @bot.message_handler(func=lambda m: get_active_order_by_buyer(m.from_user.id) is not None)
 def handle_buyer_message(message):
-    """Если у пользователя есть активный заказ, пересылаем сообщение продавцу"""
     user_id = message.from_user.id
     order = get_active_order_by_buyer(user_id)
     if not order:
@@ -115,12 +138,14 @@ def handle_buyer_message(message):
     save_message(order['id'], user_id, 'buyer', message.text)
 
     seller_id = order['seller_id']
-    seller_info = supabase.table('sellers').select('telegram_id').eq('id', seller_id).execute().data
-    if seller_info:
-        seller_tg = seller_info[0]['telegram_id']
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT telegram_id FROM sellers WHERE id = %s", (seller_id,))
+            seller = cur.fetchone()
+    if seller:
         try:
             bot.send_message(
-                seller_tg,
+                seller['telegram_id'],
                 f"💬 Сообщение от покупателя (заказ {order['order_number']}):\n\n{message.text}"
             )
         except Exception as e:
@@ -141,7 +166,6 @@ def handle_seller_message(message):
     text = message.text.strip()
 
     if not text.startswith('#'):
-        # Если нет #, показываем список активных заказов
         seller = get_seller_by_telegram_id(user_id)
         if not seller:
             return
@@ -275,19 +299,12 @@ def new_order():
 
         order_number = generate_order_number(seller['name'])
 
-        # Формируем текст заказа для уведомления (можно сохранять items как есть)
-        items_text = "\n".join([
-            f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
-            for item in items
-        ])
-        order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery}"
-
-        # Сохраняем заказ в таблицу orders
-        # Нужно учесть, какие поля есть в вашей таблице orders. Предположим, там есть:
-        # buyer_id, buyer_name, items (JSON), total, status, created_at, и добавленные нами order_number, seller_id, address_id
-        # Найдем address_id по адресу
-        addr_res = supabase.table('pickup_locations').select('id').eq('address_text', address).execute()
-        address_id = addr_res.data[0]['id'] if addr_res.data else None
+        # Получаем address_id
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM pickup_locations WHERE address_text = %s", (address,))
+                addr = cur.fetchone()
+                address_id = addr['id'] if addr else None
 
         order_data = {
             'order_number': order_number,
@@ -295,16 +312,21 @@ def new_order():
             'buyer_name': buyer_name,
             'seller_id': seller['id'],
             'address_id': address_id,
-            'items': items,  # сохраняем как JSON
+            'items': json.dumps(items),  # сохраняем как JSON строку
             'total': total,
-            'status': 'active',
             'payment_method': payment,
-            'delivery_type': delivery
-            # created_at добавится автоматически
+            'delivery_type': delivery,
+            'status': 'active'
         }
-        saved_order = save_order(order_data)
-        if not saved_order:
-            return jsonify({'error': 'Failed to save order'}), 500
+
+        order_id = save_order(order_data)
+
+        # Формируем текст заказа для уведомления
+        items_text = "\n".join([
+            f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
+            for item in items
+        ])
+        order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery}"
 
         # Уведомление продавцу
         seller_tg = seller['telegram_id']
