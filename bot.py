@@ -30,7 +30,6 @@ WEBHOOK_URL = f"{BASE_URL}/webhook"
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def parse_contact(contact_json):
-    """Преобразует JSON-строку contact в словарь"""
     if isinstance(contact_json, dict):
         return contact_json
     try:
@@ -39,7 +38,6 @@ def parse_contact(contact_json):
         return {}
 
 def parse_items(items_json):
-    """Преобразует JSON-строку items в список"""
     if isinstance(items_json, list):
         return items_json
     try:
@@ -441,8 +439,6 @@ def new_order():
     except Exception as e:
         logger.exception("Ошибка в /api/new-order")
         return jsonify({'error': str(e)}), 500
-
-# ==================== ЗАПУСК ====================
 
 if __name__ == '__main__':
     bot.remove_webhook()
