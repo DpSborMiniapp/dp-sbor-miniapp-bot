@@ -367,6 +367,14 @@ def new_order():
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
+        # Проверка на уникальность request_id
+        if request_id:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM orders WHERE request_id = %s", (request_id,))
+                    if cur.fetchone():
+                        return jsonify({'error': 'Duplicate order'}), 409
+
         seller = get_seller_by_address(address)
         if not seller:
             logger.error(f"Не найден продавец для адреса {address}")
