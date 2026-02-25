@@ -289,6 +289,23 @@ def handle_seller_complete(call):
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
 
+    # Проверяем статус заказа
+    current_status = order['status']
+    if current_status not in ('active', 'Активный'):
+        logger.error(f"Заказ {order_num} уже не активен (статус: {current_status})")
+        bot.answer_callback_query(call.id, f"❌ Заказ уже не активен")
+        # Убираем кнопки, так как заказ уже не активен
+        try:
+            bot.edit_message_reply_markup(
+                user_id,
+                call.message.message_id,
+                reply_markup=None
+            )
+        except:
+            pass
+        return
+
+    # Завершаем заказ
     complete_order(order['id'])
     logger.info(f"Заказ {order_num} завершён в БД")
 
@@ -438,6 +455,54 @@ def new_order():
 
     except Exception as e:
         logger.exception("Ошибка в /api/new-order")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/order-cancelled', methods=['POST'])
+def order_cancelled():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data'}), 400
+
+        order_id = data.get('orderId')
+        user_id = data.get('userId')
+        seller_id = data.get('sellerId')
+
+        if not all([order_id, seller_id]):
+            return jsonify({'error': 'Missing fields'}), 400
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT order_number, status FROM orders WHERE id = %s", (order_id,))
+                order = cur.fetchone()
+                if not order:
+                    return jsonify({'error': 'Order not found'}), 404
+
+                order_number = order['order_number']
+                order_status = order['status']
+
+                cur.execute("SELECT telegram_id FROM sellers WHERE id = %s", (seller_id,))
+                seller = cur.fetchone()
+                if not seller:
+                    return jsonify({'error': 'Seller not found'}), 404
+
+                seller_tg = seller['telegram_id']
+
+        # Отправляем сообщение продавцу об отмене
+        try:
+            bot.send_message(
+                seller_tg,
+                f"❌ *Заказ {order_number} отменён покупателем.*",
+                parse_mode='Markdown'
+            )
+            logger.info(f"Уведомление об отмене заказа {order_number} отправлено продавцу {seller_tg}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления об отмене: {e}")
+
+        return jsonify({'status': 'ok'})
+
+    except Exception as e:
+        logger.exception("Ошибка в /api/order-cancelled")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
