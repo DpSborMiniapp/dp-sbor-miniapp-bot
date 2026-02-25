@@ -28,15 +28,21 @@ logger = logging.getLogger(__name__)
 # ==================== ФУНКЦИИ РАБОТЫ С БАЗОЙ ====================
 
 def get_seller_by_address(address: str):
-    addr = supabase.table('addresses').select('seller_id').eq('address', address).execute()
-    if not addr.data:
+    """Возвращает продавца по адресу самовывоза"""
+    # Ищем адрес в таблице pickup_locations по полю address_text
+    addr_res = supabase.table('pickup_locations').select('seller_id').eq('address_text', address).execute()
+    if not addr_res.data:
         return None
-    seller_id = addr.data[0]['seller_id']
-    seller = supabase.table('sellers').select('*').eq('id', seller_id).execute()
-    return seller.data[0] if seller.data else None
+    seller_id = addr_res.data[0]['seller_id']
+    if not seller_id:
+        return None
+    seller_res = supabase.table('sellers').select('*').eq('id', seller_id).execute()
+    return seller_res.data[0] if seller_res.data else None
 
 def generate_order_number(seller_name: str):
+    """Генерирует номер заказа вида А1, Е2 и т.д."""
     first_letter = seller_name[0].upper()
+    # Получаем текущий счётчик для этой буквы
     counter_res = supabase.table('order_counters').select('counter').eq('seller_letter', first_letter).execute()
     if counter_res.data:
         new_counter = counter_res.data[0]['counter'] + 1
@@ -47,28 +53,34 @@ def generate_order_number(seller_name: str):
     return f"{first_letter}{new_counter}"
 
 def save_order(order_data: dict):
+    """Сохраняет заказ в таблицу orders и возвращает его"""
     res = supabase.table('orders').insert(order_data).execute()
     return res.data[0] if res.data else None
 
 def get_active_order_by_buyer(buyer_id: int):
+    """Возвращает активный заказ покупателя (если есть)"""
     res = supabase.table('orders').select('*').eq('buyer_id', buyer_id).eq('status', 'active').execute()
     return res.data[0] if res.data else None
 
 def get_active_orders_by_seller(seller_id: int):
+    """Возвращает все активные заказы продавца"""
     res = supabase.table('orders').select('*').eq('seller_id', seller_id).eq('status', 'active').execute()
     return res.data
 
 def get_order_by_number(order_number: str):
+    """Находит заказ по его номеру (например, А1)"""
     res = supabase.table('orders').select('*').eq('order_number', order_number).execute()
     return res.data[0] if res.data else None
 
 def complete_order(order_id: int):
+    """Отмечает заказ как завершённый"""
     supabase.table('orders').update({
         'status': 'completed',
         'completed_at': datetime.utcnow().isoformat()
     }).eq('id', order_id).execute()
 
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
+    """Сохраняет сообщение в историю"""
     data = {
         'order_id': order_id,
         'sender_id': sender_id,
@@ -78,6 +90,7 @@ def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
     supabase.table('messages').insert(data).execute()
 
 def get_seller_by_telegram_id(telegram_id: int):
+    """Проверяет, является ли пользователь продавцом, и возвращает его данные"""
     res = supabase.table('sellers').select('*').eq('telegram_id', telegram_id).execute()
     return res.data[0] if res.data else None
 
@@ -262,23 +275,32 @@ def new_order():
 
         order_number = generate_order_number(seller['name'])
 
+        # Формируем текст заказа для уведомления (можно сохранять items как есть)
         items_text = "\n".join([
             f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
             for item in items
         ])
         order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery}"
 
+        # Сохраняем заказ в таблицу orders
+        # Нужно учесть, какие поля есть в вашей таблице orders. Предположим, там есть:
+        # buyer_id, buyer_name, items (JSON), total, status, created_at, и добавленные нами order_number, seller_id, address_id
+        # Найдем address_id по адресу
+        addr_res = supabase.table('pickup_locations').select('id').eq('address_text', address).execute()
+        address_id = addr_res.data[0]['id'] if addr_res.data else None
+
         order_data = {
             'order_number': order_number,
             'buyer_id': buyer_id,
             'buyer_name': buyer_name,
             'seller_id': seller['id'],
-            'address_id': None,
-            'items': items,
+            'address_id': address_id,
+            'items': items,  # сохраняем как JSON
             'total': total,
+            'status': 'active',
             'payment_method': payment,
-            'delivery_type': delivery,
-            'status': 'active'
+            'delivery_type': delivery
+            # created_at добавится автоматически
         }
         saved_order = save_order(order_data)
         if not saved_order:
