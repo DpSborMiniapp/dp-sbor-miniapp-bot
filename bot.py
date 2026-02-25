@@ -25,12 +25,32 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+def parse_contact(contact_json):
+    """Преобразует JSON-строку contact в словарь"""
+    if isinstance(contact_json, dict):
+        return contact_json
+    try:
+        return json.loads(contact_json)
+    except:
+        return {}
+
+def parse_items(items_json):
+    """Преобразует JSON-строку items в список"""
+    if isinstance(items_json, list):
+        return items_json
+    try:
+        return json.loads(items_json)
+    except:
+        return []
+
 # ==================== ФУНКЦИИ РАБОТЫ С БАЗОЙ ====================
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def get_seller_by_address(address: str):
+    """Возвращает продавца по адресу самовывоза"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT seller_id FROM pickup_locations WHERE address = %s", (address,))
@@ -42,6 +62,7 @@ def get_seller_by_address(address: str):
             return cur.fetchone()
 
 def generate_order_number(seller_name: str):
+    """Генерирует номер заказа вида А1, Е2 и т.д."""
     first_letter = seller_name[0].upper()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -57,45 +78,80 @@ def generate_order_number(seller_name: str):
             return f"{first_letter}{new_counter}"
 
 def save_order(order_data: dict):
+    """Сохраняет заказ в таблицу orders и возвращает его ID"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            order_data['items'] = json.dumps(order_data['items'])
-            # ИЗМЕНЕНО: buyer_id -> user_id
+            # items преобразуем в JSON-строку
+            items_json = json.dumps(order_data['items'])
+            # Формируем contact JSON
+            contact = {
+                'name': order_data['buyer_name'],
+                'phone': '0000000000',  # в миниаппе всегда так, можно при желании передавать
+                'address': order_data['address'],
+                'paymentMethod': order_data['payment_method'],
+                'deliveryType': order_data['delivery_type']
+            }
+            contact_json = json.dumps(contact)
             cur.execute("""
-                INSERT INTO orders (order_number, user_id, buyer_name, seller_id, address_id, items, total, payment_method, delivery_type, status)
-                VALUES (%(order_number)s, %(user_id)s, %(buyer_name)s, %(seller_id)s, %(address_id)s, %(items)s, %(total)s, %(payment_method)s, %(delivery_type)s, %(status)s)
+                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, order_data)
+            """, (
+                order_data['order_number'],
+                order_data['user_id'],
+                order_data['seller_id'],
+                order_data.get('address_id'),
+                items_json,
+                order_data['total'],
+                contact_json,
+                order_data['status']
+            ))
             order_id = cur.fetchone()['id']
             conn.commit()
             return order_id
 
 def get_active_order_by_buyer(buyer_id: int):
+    """Возвращает активный заказ покупателя (с распарсенным contact)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # ИЗМЕНЕНО: buyer_id -> user_id
             cur.execute("SELECT * FROM orders WHERE user_id = %s AND status = 'active'", (buyer_id,))
-            return cur.fetchone()
+            order = cur.fetchone()
+            if order:
+                order['contact'] = parse_contact(order['contact'])
+                order['items'] = parse_items(order['items'])
+            return order
 
 def get_active_orders_by_seller(seller_id: int):
+    """Возвращает все активные заказы продавца (с распарсенным contact)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE seller_id = %s AND status = 'active'", (seller_id,))
-            return cur.fetchall()
+            orders = cur.fetchall()
+            for o in orders:
+                o['contact'] = parse_contact(o['contact'])
+                o['items'] = parse_items(o['items'])
+            return orders
 
 def get_order_by_number(order_number: str):
+    """Находит заказ по его номеру (с распарсенным contact)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
-            return cur.fetchone()
+            order = cur.fetchone()
+            if order:
+                order['contact'] = parse_contact(order['contact'])
+                order['items'] = parse_items(order['items'])
+            return order
 
 def complete_order(order_id: int):
+    """Отмечает заказ как завершённый"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE orders SET status = 'completed', completed_at = %s WHERE id = %s", (datetime.utcnow().isoformat(), order_id))
             conn.commit()
 
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
+    """Сохраняет сообщение в историю"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -105,6 +161,7 @@ def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
             conn.commit()
 
 def get_seller_by_telegram_id(telegram_id: int):
+    """Возвращает данные продавца по его telegram_id"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM sellers WHERE telegram_id = %s", (telegram_id,))
@@ -119,6 +176,7 @@ def is_admin(telegram_id: int) -> bool:
 def handle_start(message):
     bot.reply_to(message, "👋 Добро пожаловать! Здесь будут ваши заказы и общение с продавцом.")
 
+# ----- ПОКУПАТЕЛИ -----
 @bot.message_handler(func=lambda m: get_active_order_by_buyer(m.from_user.id) is not None)
 def handle_buyer_message(message):
     user_id = message.from_user.id
@@ -145,11 +203,12 @@ def handle_buyer_message(message):
     if ADMIN_ID:
         bot.send_message(
             ADMIN_ID,
-            f"📩 [Копия] Покупатель {order['buyer_name']} (заказ {order['order_number']}):\n{message.text}"
+            f"📩 [Копия] Покупатель {order['contact']['name']} (заказ {order['order_number']}):\n{message.text}"
         )
 
     bot.reply_to(message, "✅ Сообщение отправлено продавцу.")
 
+# ----- ПРОДАВЦЫ -----
 @bot.message_handler(func=lambda m: get_seller_by_telegram_id(m.from_user.id) is not None)
 def handle_seller_message(message):
     user_id = message.from_user.id
@@ -161,7 +220,7 @@ def handle_seller_message(message):
             return
         orders = get_active_orders_by_seller(seller['id'])
         if orders:
-            order_list = "\n".join([f"• Заказ {o['order_number']} – {o['buyer_name']}" for o in orders])
+            order_list = "\n".join([f"• Заказ {o['order_number']} – {o['contact']['name']}" for o in orders])
             bot.reply_to(
                 message,
                 f"📋 Ваши активные заказы:\n{order_list}\n\n"
@@ -194,7 +253,7 @@ def handle_seller_message(message):
 
         try:
             bot.send_message(
-                order['user_id'],  # ИЗМЕНЕНО: buyer_id -> user_id
+                order['user_id'],
                 f"💬 Сообщение от продавца (заказ {order_num}):\n\n{reply_text}"
             )
         except Exception as e:
@@ -212,6 +271,7 @@ def handle_seller_message(message):
         logger.error(f"Ошибка обработки сообщения продавца: {e}")
         bot.reply_to(message, "❌ Ошибка. Используйте формат: #А1 текст сообщения")
 
+# ----- КНОПКА ДЛЯ ПРОДАВЦА (ТОЛЬКО ЗАВЕРШИТЬ) -----
 @bot.callback_query_handler(func=lambda call: call.data.startswith('complete_'))
 def handle_seller_complete(call):
     user_id = call.from_user.id
@@ -230,20 +290,23 @@ def handle_seller_complete(call):
     complete_order(order['id'])
     bot.answer_callback_query(call.id, "✅ Заказ завершён")
 
+    # Уведомляем покупателя
     try:
         bot.send_message(
-            order['user_id'],  # ИЗМЕНЕНО: buyer_id -> user_id
+            order['user_id'],
             f"✅ Ваш заказ {order_num} выполнен. Спасибо за покупку!"
         )
     except Exception as e:
         logger.error(f"Ошибка уведомления покупателя: {e}")
 
+    # Уведомляем админа
     if ADMIN_ID:
         bot.send_message(
             ADMIN_ID,
             f"✅ Продавец {seller['name']} завершил заказ {order_num}."
         )
 
+    # Убираем кнопки из сообщения продавца
     try:
         bot.edit_message_reply_markup(
             user_id,
@@ -253,6 +316,7 @@ def handle_seller_complete(call):
     except:
         pass
 
+# ----- ОСТАЛЬНЫЕ ПОЛЬЗОВАТЕЛИ -----
 @bot.message_handler(func=lambda m: True)
 def fallback_handler(message):
     bot.reply_to(message, "Используйте кнопки или начните новый заказ в нашем мини-аппе.")
@@ -270,8 +334,7 @@ def new_order():
         if not data:
             return jsonify({'error': 'No data'}), 400
 
-        # ИЗМЕНЕНО: userId -> user_id (но в переменной оставим buyer_id для читаемости)
-        buyer_id = data.get('userId')
+        user_id = data.get('userId')
         buyer_name = data.get('name', 'Покупатель')
         items = data.get('items')
         total = data.get('total')
@@ -279,7 +342,7 @@ def new_order():
         payment = data.get('paymentMethod')
         delivery = data.get('deliveryType')
 
-        if not all([buyer_id, items, total, address]):
+        if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
         seller = get_seller_by_address(address)
@@ -295,10 +358,9 @@ def new_order():
                 addr = cur.fetchone()
                 address_id = addr['id'] if addr else None
 
-        # ИЗМЕНЕНО: buyer_id -> user_id в ключе словаря
         order_data = {
             'order_number': order_number,
-            'user_id': buyer_id,          # ключ теперь user_id
+            'user_id': user_id,
             'buyer_name': buyer_name,
             'seller_id': seller['id'],
             'address_id': address_id,
@@ -306,6 +368,7 @@ def new_order():
             'total': total,
             'payment_method': payment,
             'delivery_type': delivery,
+            'address': address,
             'status': 'active'
         }
 
