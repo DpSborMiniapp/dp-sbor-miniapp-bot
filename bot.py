@@ -506,3 +506,4 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
+
