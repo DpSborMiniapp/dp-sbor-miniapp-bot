@@ -90,8 +90,8 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
             items_json = json.dumps(order_data['items'])
             contact_json = json.dumps(contact)
             cur.execute("""
-                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id, notified_bool)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id, notified_bool, delivery_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 order_data['order_number'],
@@ -103,7 +103,8 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
                 contact_json,
                 order_data['status'],
                 request_id,
-                False
+                False,
+                order_data['delivery_type']
             ))
             order_id = cur.fetchone()['id']
             conn.commit()
@@ -379,7 +380,6 @@ def new_order():
 
         # Определяем продавца
         if delivery == 'courier':
-            # Для доставки назначаем администратора
             seller = get_admin_seller()
             if not seller:
                 logger.error("Администратор не найден в таблице sellers")
@@ -402,7 +402,8 @@ def new_order():
                         logger.info(f"Найден существующий заказ с request_id {request_id}")
                         order_number = existing['order_number']
                         if not order_number:
-                            order_number = generate_order_number(seller['name'])
+                            prefix = "Dоставка" if delivery == 'courier' else seller['name']
+                            order_number = generate_order_number(prefix)
                             cur.execute("UPDATE orders SET order_number = %s WHERE id = %s", (order_number, existing['id']))
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
@@ -447,7 +448,10 @@ def new_order():
                         return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
 
         # Генерация номера для нового заказа
-        order_number = generate_order_number(seller['name'])
+        if delivery == 'courier':
+            order_number = generate_order_number("Dоставка")  # префикс 'D'
+        else:
+            order_number = generate_order_number(seller['name'])
 
         # Получаем address_id только для самовывоза
         address_id = None
@@ -475,11 +479,12 @@ def new_order():
             'address_id': address_id,
             'items': items,
             'total': total,
-            'status': 'active'
+            'status': 'active',
+            'delivery_type': delivery
         }
 
         order_id = save_order(order_data, contact, request_id)
-        logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']})")
+        logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']}, delivery_type={delivery})")
 
         # Отправка уведомлений
         items_text = "\n".join([
