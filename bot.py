@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -63,6 +64,8 @@ def save_order(order_data: dict):
     """Сохраняет заказ в таблицу orders и возвращает его ID"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Преобразуем items в JSON-строку
+            order_data['items'] = json.dumps(order_data['items'])
             cur.execute("""
                 INSERT INTO orders (order_number, buyer_id, buyer_name, seller_id, address_id, items, total, payment_method, delivery_type, status)
                 VALUES (%(order_number)s, %(buyer_id)s, %(buyer_name)s, %(seller_id)s, %(address_id)s, %(items)s, %(total)s, %(payment_method)s, %(delivery_type)s, %(status)s)
@@ -315,7 +318,7 @@ def new_order():
             'buyer_name': buyer_name,
             'seller_id': seller['id'],
             'address_id': address_id,
-            'items': items,  # передаём как есть (будет JSON)
+            'items': items,  # здесь items пока остаётся словарём, но в save_order будет преобразован
             'total': total,
             'payment_method': payment,
             'delivery_type': delivery,
