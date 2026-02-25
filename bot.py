@@ -72,14 +72,14 @@ def generate_order_number(seller_name: str):
             conn.commit()
             return f"{first_letter}{new_counter}"
 
-def save_order(order_data: dict, contact: dict):
+def save_order(order_data: dict, contact: dict, request_id: str = None):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             items_json = json.dumps(order_data['items'])
             contact_json = json.dumps(contact)
             cur.execute("""
-                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status, request_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 order_data['order_number'],
@@ -89,7 +89,8 @@ def save_order(order_data: dict, contact: dict):
                 items_json,
                 order_data['total'],
                 contact_json,
-                order_data['status']
+                order_data['status'],
+                request_id
             ))
             order_id = cur.fetchone()['id']
             conn.commit()
@@ -283,7 +284,6 @@ def handle_seller_complete(call):
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
 
-    # Проверяем статус
     if order['status'] not in ('active', 'Активный'):
         logger.error(f"Заказ {order_num} уже не активен (статус: {order['status']})")
         bot.answer_callback_query(call.id, f"❌ Заказ уже не активен")
@@ -362,6 +362,7 @@ def new_order():
         payment = data.get('paymentMethod')
         delivery = data.get('deliveryType')
         contact = data.get('contact')
+        request_id = data.get('requestId')
 
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
@@ -398,7 +399,7 @@ def new_order():
             'status': 'active'
         }
 
-        order_id = save_order(order_data, contact)
+        order_id = save_order(order_data, contact, request_id)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id}")
 
         items_text = "\n".join([
