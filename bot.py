@@ -28,7 +28,6 @@ BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dp-sbor-miniapp-bot.onrende
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
 def parse_contact(contact_json):
-    """Преобразует JSON-строку contact в словарь"""
     if isinstance(contact_json, dict):
         return contact_json
     try:
@@ -37,7 +36,6 @@ def parse_contact(contact_json):
         return {}
 
 def parse_items(items_json):
-    """Преобразует JSON-строку items в список"""
     if isinstance(items_json, list):
         return items_json
     try:
@@ -49,7 +47,7 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def get_seller_by_address(address: str):
-    """Возвращает продавца по адресу самовывоза"""
+    """Возвращает продавца по адресу самовывоза (только для pickup)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT seller_id FROM pickup_locations WHERE address = %s", (address,))
@@ -61,7 +59,7 @@ def get_seller_by_address(address: str):
             return cur.fetchone()
 
 def generate_order_number(prefix: str):
-    """Генерирует номер заказа вида А1, К2 и т.д. на основе максимального номера с такой буквой"""
+    """Генерирует номер заказа вида А1, К2 и т.д."""
     first_letter = prefix[0].upper()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -79,7 +77,6 @@ def generate_order_number(prefix: str):
             return f"{first_letter}{new_counter}"
 
 def save_order(order_data: dict, contact: dict, request_id: str = None):
-    """Сохраняет заказ в таблицу orders и возвращает его ID"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             items_json = json.dumps(order_data['items'])
@@ -105,7 +102,6 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
             return order_id
 
 def get_active_order_by_buyer(buyer_id: int):
-    """Возвращает активный заказ покупателя (если есть)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE user_id = %s AND status IN ('active', 'Активный')", (buyer_id,))
@@ -116,7 +112,6 @@ def get_active_order_by_buyer(buyer_id: int):
             return order
 
 def get_active_orders_by_seller(seller_id: int):
-    """Возвращает все активные заказы продавца"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE seller_id = %s AND status IN ('active', 'Активный')", (seller_id,))
@@ -127,7 +122,6 @@ def get_active_orders_by_seller(seller_id: int):
             return orders
 
 def get_order_by_number(order_number: str):
-    """Находит заказ по его номеру"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
@@ -138,7 +132,6 @@ def get_order_by_number(order_number: str):
             return order
 
 def complete_order(order_id: int):
-    """Отмечает заказ как завершённый"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE orders SET status = 'completed', completed_at = %s WHERE id = %s",
@@ -146,7 +139,6 @@ def complete_order(order_id: int):
             conn.commit()
 
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
-    """Сохраняет сообщение в историю (предполагается таблица messages)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -156,7 +148,6 @@ def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
             conn.commit()
 
 def get_seller_by_telegram_id(telegram_id: int):
-    """Возвращает данные продавца по его telegram_id"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM sellers WHERE telegram_id = %s", (telegram_id,))
@@ -226,6 +217,7 @@ def handle_buyer_message(message):
             except Exception as e:
                 logger.error(f"Ошибка отправки админу: {e}")
 
+    # Копия админу при самовывозе
     if ADMIN_ID and order['seller_id']:
         bot.send_message(
             ADMIN_ID,
@@ -280,7 +272,7 @@ def handle_seller_message(message):
             logger.error(f"Ошибка отправки покупателю: {e}")
 
         if ADMIN_ID and not is_admin(user_id):
-            seller_name = seller['name'] if 'seller' in locals() else "Неизвестный продавец"
+            seller_name = seller['name'] if 'seller' in locals() and seller else "Неизвестный продавец"
             try:
                 bot.send_message(
                     ADMIN_ID,
@@ -396,16 +388,17 @@ def new_order():
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        # Если доставка, то продавец не назначается
+        # Определяем тип доставки
         if delivery == 'courier':
             seller = None
+            # Для доставки адрес может быть любым, не ищем продавца
         else:
             seller = get_seller_by_address(address)
             if not seller:
                 logger.error(f"Не найден продавец для адреса {address}")
                 return jsonify({'error': 'Seller not found for this address'}), 404
 
-        # Проверка существующего заказа
+        # Проверка существующего заказа по request_id
         if request_id:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -430,6 +423,7 @@ def new_order():
                             markup = types.InlineKeyboardMarkup()
                             markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
                             if seller:
+                                # Самовывоз – продавцу
                                 try:
                                     bot.send_message(
                                         seller['telegram_id'],
@@ -437,7 +431,7 @@ def new_order():
                                         f"👤 Покупатель: {buyer_name}\n"
                                         f"📍 {address}\n"
                                         f"📝 {order_text}\n\n"
-                                        f"💬 Чтобы ответить, используйте `#{order_number} текст`",
+                                        f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
                                         parse_mode='Markdown',
                                         reply_markup=markup
                                     )
@@ -445,6 +439,7 @@ def new_order():
                                 except Exception as e:
                                     logger.error(f"Ошибка уведомления продавца: {e}")
                             else:
+                                # Доставка – админу
                                 try:
                                     bot.send_message(
                                         ADMIN_ID,
@@ -452,13 +447,14 @@ def new_order():
                                         f"👤 Покупатель: {buyer_name}\n"
                                         f"📍 {address}\n"
                                         f"📝 {order_text}\n\n"
-                                        f"💬 Чтобы ответить, используйте `#{order_number} текст`",
+                                        f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
                                         parse_mode='Markdown',
                                         reply_markup=markup
                                     )
                                     logger.info(f"Уведомление отправлено админу")
                                 except Exception as e:
                                     logger.error(f"Ошибка уведомления админа: {e}")
+                            # Копия админу при самовывозе
                             if seller and ADMIN_ID:
                                 try:
                                     bot.send_message(
@@ -484,11 +480,14 @@ def new_order():
             order_number = generate_order_number("Курьер")
             seller_id = None
 
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM pickup_locations WHERE address = %s", (address,))
-                addr = cur.fetchone()
-                address_id = addr['id'] if addr else None
+        # Получаем address_id (только для pickup, для доставки может быть NULL)
+        address_id = None
+        if seller:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM pickup_locations WHERE address = %s", (address,))
+                    addr = cur.fetchone()
+                    address_id = addr['id'] if addr else None
 
         if not contact:
             contact = {
