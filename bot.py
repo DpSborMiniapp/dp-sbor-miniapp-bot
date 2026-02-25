@@ -58,18 +58,21 @@ def get_seller_by_address(address: str):
             return cur.fetchone()
 
 def generate_order_number(seller_name: str):
+    """Генерирует номер заказа вида А1, Е2 и т.д. на основе максимального существующего номера для продавца"""
     first_letter = seller_name[0].upper()
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT counter FROM order_counters WHERE seller_letter = %s", (first_letter,))
-            counter = cur.fetchone()
-            if counter:
-                new_counter = counter['counter'] + 1
-                cur.execute("UPDATE order_counters SET counter = %s WHERE seller_letter = %s", (new_counter, first_letter))
+            cur.execute("SELECT order_number FROM orders WHERE order_number LIKE %s", (first_letter + '%',))
+            numbers = []
+            for row in cur.fetchall():
+                if row['order_number'] and len(row['order_number']) > 1:
+                    num_str = row['order_number'][1:]
+                    if num_str.isdigit():
+                        numbers.append(int(num_str))
+            if numbers:
+                new_counter = max(numbers) + 1
             else:
                 new_counter = 1
-                cur.execute("INSERT INTO order_counters (seller_letter, counter) VALUES (%s, %s)", (first_letter, new_counter))
-            conn.commit()
             return f"{first_letter}{new_counter}"
 
 def save_order(order_data: dict, contact: dict, request_id: str = None):
@@ -367,20 +370,32 @@ def new_order():
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        # ========== КЛЮЧЕВАЯ ПРОВЕРКА С ЛОГИРОВАНИЕМ ==========
+        # ========== УМНАЯ ОБРАБОТКА ДУБЛИКАТОВ ==========
         if request_id:
-            try:
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT order_number FROM orders WHERE request_id = %s", (request_id,))
-                        existing = cur.fetchone()
-                        if existing:
-                            logger.info(f"ЗАКАЗ УЖЕ СУЩЕСТВУЕТ: request_id={request_id}, номер={existing['order_number']}")
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id, order_number FROM orders WHERE request_id = %s", (request_id,))
+                    existing = cur.fetchone()
+                    if existing:
+                        # Если заказ уже есть, проверяем его номер
+                        if existing['order_number']:
+                            # Номер есть – возвращаем его
+                            logger.info(f"Найден существующий заказ с request_id {request_id}, номер {existing['order_number']}")
                             return jsonify({'status': 'ok', 'orderNumber': existing['order_number']}), 200
-            except Exception as e:
-                logger.error(f"Ошибка при проверке request_id: {e}")
-                # Если ошибка базы, лучше продолжить, чтобы попытаться создать заказ
-        # =====================================================
+                        else:
+                            # Номера нет – генерируем новый и обновляем запись
+                            # Сначала нужно получить имя продавца по адресу (передаётся в запросе)
+                            seller = get_seller_by_address(address)
+                            if seller:
+                                new_order_number = generate_order_number(seller['name'])
+                                cur.execute("UPDATE orders SET order_number = %s WHERE id = %s", (new_order_number, existing['id']))
+                                conn.commit()
+                                logger.info(f"Обновлён заказ {existing['id']} с новым номером {new_order_number}")
+                                return jsonify({'status': 'ok', 'orderNumber': new_order_number}), 200
+                            else:
+                                logger.error("Не удалось найти продавца для обновления номера")
+                                return jsonify({'error': 'Seller not found'}), 404
+        # ===============================================
 
         seller = get_seller_by_address(address)
         if not seller:
@@ -440,10 +455,38 @@ def new_order():
             )
             logger.info(f"Уведомление отправлено продавцу {seller_tg}")
         except Exception as e:
+            logger.error(f"Ошибка увед ответить покупателю, используйте `#{order_number} текст`",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+            logger.info(f"Уведомление отправлено продавцу {seller_tg}")
+        except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
 
         if ADMIN_ID:
             try:
+омления продавца: {e}")
+
+        if ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🆕 *Новый заказ {order_number}*\n"
+                    f"Продавец: {seller['name']}\n"
+                    f"Покупатель: {buyer_name}\n"
+                    f"Адрес: {address}\n"
+                    f"Сумма: {total} руб.",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка уведомления админа: {e}")
+
+        return jsonify({'status': 'ok', 'orderNumber': order_number})
+
+    except Exception as e:
+        logger.exception("Ошибка в /api/new-order")
+        return jsonify({'error': str(e)}), 500
+
                 bot.send_message(
                     ADMIN_ID,
                     f"🆕 *Новый заказ {order_number}*\n"
@@ -473,13 +516,32 @@ def order_cancelled():
         user_id = data.get('userId')
         seller_id = data.get('sellerId')
 
+        if not all@app.route('/api/order-cancelled', methods=['POST'])
+def order_cancelled():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data'}), 400
+
+        order_id = data.get('orderId')
+        user_id = data.get('userId')
+        seller_id = data.get('sellerId')
+
         if not all([order_id, seller_id]):
             logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}")
             return jsonify({'error': 'Missing fields'}), 400
 
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT order([order_id, seller_id]):
+            logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}")
+            return jsonify({'error': 'Missing fields'}), 400
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
                 cur.execute("SELECT order_number FROM orders WHERE id = %s", (order_id,))
+                order = cur.fetchone()
+                if not_number FROM orders WHERE id = %s", (order_id,))
                 order = cur.fetchone()
                 if not order:
                     return jsonify({'error': 'Order not found'}), 404
