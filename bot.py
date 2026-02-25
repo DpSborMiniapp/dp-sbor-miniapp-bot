@@ -30,6 +30,7 @@ WEBHOOK_URL = f"{BASE_URL}/webhook"
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def parse_contact(contact_json):
+    """Преобразует JSON-строку contact в словарь"""
     if isinstance(contact_json, dict):
         return contact_json
     try:
@@ -38,6 +39,7 @@ def parse_contact(contact_json):
         return {}
 
 def parse_items(items_json):
+    """Преобразует JSON-строку items в список"""
     if isinstance(items_json, list):
         return items_json
     try:
@@ -76,17 +78,10 @@ def generate_order_number(seller_name: str):
             conn.commit()
             return f"{first_letter}{new_counter}"
 
-def save_order(order_data: dict):
+def save_order(order_data: dict, contact: dict):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             items_json = json.dumps(order_data['items'])
-            contact = {
-                'name': order_data['buyer_name'],
-                'phone': '0000000000',
-                'address': order_data['address'],
-                'paymentMethod': order_data['payment_method'],
-                'deliveryType': order_data['delivery_type']
-            }
             contact_json = json.dumps(contact)
             cur.execute("""
                 INSERT INTO orders (order_number, user_id, seller_id, address_id, items, total, contact, status)
@@ -161,28 +156,31 @@ def get_seller_by_telegram_id(telegram_id: int):
 def is_admin(telegram_id: int) -> bool:
     return telegram_id == ADMIN_ID
 
-# ==================== КЛАВИАТУРЫ ====================
-def seller_main_keyboard():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("📋 Мои активные заказы"))
-    return markup
-
 # ==================== ОБРАБОТЧИКИ TELEGRAM ====================
+
+def main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("📋 Мои активные заказы"))
+    return keyboard
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
+    bot.send_message(message.chat.id, "👋 Добро пожаловать! Здесь будут ваши заказы и общение с продавцом.", reply_markup=main_keyboard())
+
+@bot.message_handler(func=lambda m: m.text == "📋 Мои активные заказы")
+def handle_my_orders(message):
     user_id = message.from_user.id
     seller = get_seller_by_telegram_id(user_id)
-    if seller:
-        bot.send_message(
-            user_id,
-            "👋 Добро пожаловать, продавец! Используйте кнопку ниже для просмотра активных заказов.",
-            reply_markup=seller_main_keyboard()
-        )
+    if not seller:
+        bot.reply_to(message, "Вы не являетесь продавцом.")
+        return
+    orders = get_active_orders_by_seller(seller['id'])
+    if orders:
+        order_list = "\n".join([f"• #{o['order_number']}" for o in orders])
+        bot.reply_to(message, f"📋 *Ваши активные заказы:*\n{order_list}", parse_mode="Markdown")
     else:
-        bot.reply_to(message, "👋 Добро пожаловать! Здесь будут ваши заказы и общение с продавцом.")
+        bot.reply_to(message, "У вас нет активных заказов.")
 
-# ----- ПОКУПАТЕЛИ -----
 @bot.message_handler(func=lambda m: get_active_order_by_buyer(m.from_user.id) is not None)
 def handle_buyer_message(message):
     user_id = message.from_user.id
@@ -213,36 +211,16 @@ def handle_buyer_message(message):
             f"📩 [Копия] Покупатель {order['contact']['name']} (заказ {order['order_number']}):\n{message.text}"
         )
 
-    bot.reply_to(message, "✅ Сообщение отправлено продавцу.")
+    bot.reply_to(message, "✅ Сообщение отправлено продавцу.", reply_markup=main_keyboard())
 
-# ----- ПРОДАВЦЫ -----
 @bot.message_handler(func=lambda m: get_seller_by_telegram_id(m.from_user.id) is not None)
 def handle_seller_message(message):
     user_id = message.from_user.id
     text = message.text.strip()
     logger.info(f"Сообщение от продавца {user_id}: {text}")
 
-    # Обработка кнопки "Мои активные заказы"
-    if text == "📋 Мои активные заказы":
-        handle_seller_active_orders(message)
-        return
-
     if not text.startswith('#'):
-        seller = get_seller_by_telegram_id(user_id)
-        if not seller:
-            return
-        orders = get_active_orders_by_seller(seller['id'])
-        if orders:
-            order_list = "\n".join([f"• Заказ {o['order_number']} – {o['contact']['name']}" for o in orders])
-            bot.reply_to(
-                message,
-                f"📋 Ваши активные заказы:\n{order_list}\n\n"
-                "Чтобы ответить покупателю, начните сообщение с #номера_заказа, например:\n"
-                "`#А1 Здравствуйте! Ваш заказ будет готов через час`",
-                reply_markup=seller_main_keyboard()
-            )
-        else:
-            bot.reply_to(message, "У вас нет активных заказов.", reply_markup=seller_main_keyboard())
+        bot.reply_to(message, "Чтобы ответить покупателю, начните сообщение с #номера_заказа, например:\n`#А1 Здравствуйте!`", parse_mode="Markdown")
         return
 
     try:
@@ -284,31 +262,12 @@ def handle_seller_message(message):
             except Exception as e:
                 logger.error(f"Ошибка отправки админу: {e}")
 
-        bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).")
+        bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).", reply_markup=main_keyboard())
 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения продавца: {e}", exc_info=True)
         bot.reply_to(message, "❌ Ошибка. Используйте формат: #А1 текст сообщения")
 
-# ----- ОБРАБОТЧИК КНОПКИ "МОИ АКТИВНЫЕ ЗАКАЗЫ" -----
-def handle_seller_active_orders(message):
-    user_id = message.from_user.id
-    seller = get_seller_by_telegram_id(user_id)
-    if not seller:
-        bot.reply_to(message, "❌ Вы не являетесь продавцом.")
-        return
-
-    orders = get_active_orders_by_seller(seller['id'])
-    if not orders:
-        bot.send_message(user_id, "У вас нет активных заказов.", reply_markup=seller_main_keyboard())
-        return
-
-    order_numbers = [f"#{o['order_number']}" for o in orders]
-    text = "📋 *Ваши активные заказы:*\n\n" + "\n".join(order_numbers)
-    bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=seller_main_keyboard())
-    logger.info(f"Продавец {user_id} запросил список активных заказов: {order_numbers}")
-
-# ----- КНОПКА ДЛЯ ПРОДАВЦА (ТОЛЬКО ЗАВЕРШИТЬ) -----
 @bot.callback_query_handler(func=lambda call: call.data.startswith('complete_'))
 def handle_seller_complete(call):
     user_id = call.from_user.id
@@ -365,10 +324,9 @@ def handle_seller_complete(call):
 
     bot.answer_callback_query(call.id, "✅ Заказ завершён")
 
-# ----- ОСТАЛЬНЫЕ ПОЛЬЗОВАТЕЛИ -----
 @bot.message_handler(func=lambda m: True)
 def fallback_handler(message):
-    bot.reply_to(message, "Используйте кнопки или начните новый заказ в нашем мини-аппе.")
+    bot.send_message(message.chat.id, "Используйте кнопки или начните новый заказ в нашем мини-аппе.", reply_markup=main_keyboard())
 
 # ==================== FLASK-ЭНДПОИНТЫ ====================
 
@@ -399,6 +357,7 @@ def new_order():
         address = data.get('address')
         payment = data.get('paymentMethod')
         delivery = data.get('deliveryType')
+        contact = data.get('contact')
 
         if not all([user_id, items, total, address]):
             return jsonify({'error': 'Missing required fields'}), 400
@@ -416,21 +375,26 @@ def new_order():
                 addr = cur.fetchone()
                 address_id = addr['id'] if addr else None
 
+        if not contact:
+            contact = {
+                'name': buyer_name,
+                'phone': '0000000000',
+                'address': address,
+                'paymentMethod': payment,
+                'deliveryType': delivery
+            }
+
         order_data = {
             'order_number': order_number,
             'user_id': user_id,
-            'buyer_name': buyer_name,
             'seller_id': seller['id'],
             'address_id': address_id,
             'items': items,
             'total': total,
-            'payment_method': payment,
-            'delivery_type': delivery,
-            'address': address,
             'status': 'active'
         }
 
-        order_id = save_order(order_data)
+        order_id = save_order(order_data, contact)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id}")
 
         items_text = "\n".join([
