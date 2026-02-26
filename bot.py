@@ -64,7 +64,6 @@ def get_seller_by_telegram_id(telegram_id: int):
             return cur.fetchone()
 
 def get_admin_seller():
-    """Возвращает запись продавца-администратора по ADMIN_ID"""
     return get_seller_by_telegram_id(ADMIN_ID)
 
 def generate_order_number(prefix: str):
@@ -104,7 +103,7 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
                 order_data['status'],
                 request_id,
                 False,
-                order_data['delivery_type']
+                order_data.get('delivery_type')
             ))
             order_id = cur.fetchone()['id']
             conn.commit()
@@ -402,8 +401,10 @@ def new_order():
                         logger.info(f"Найден существующий заказ с request_id {request_id}")
                         order_number = existing['order_number']
                         if not order_number:
-                            prefix = "Dоставка" if delivery == 'courier' else seller['name']
-                            order_number = generate_order_number(prefix)
+                            if delivery == 'courier':
+                                order_number = generate_order_number("Dоставка")
+                            else:
+                                order_number = generate_order_number(seller['name'])
                             cur.execute("UPDATE orders SET order_number = %s WHERE id = %s", (order_number, existing['id']))
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
@@ -449,7 +450,7 @@ def new_order():
 
         # Генерация номера для нового заказа
         if delivery == 'courier':
-            order_number = generate_order_number("Dоставка")  # префикс 'D'
+            order_number = generate_order_number("Dоставка")
         else:
             order_number = generate_order_number(seller['name'])
 
@@ -484,7 +485,7 @@ def new_order():
         }
 
         order_id = save_order(order_data, contact, request_id)
-        logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']}, delivery_type={delivery})")
+        logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']})")
 
         # Отправка уведомлений
         items_text = "\n".join([
@@ -497,6 +498,7 @@ def new_order():
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
 
+        # Сообщение продавцу (или админу)
         try:
             bot.send_message(
                 seller['telegram_id'],
@@ -527,6 +529,25 @@ def new_order():
             except Exception as e:
                 logger.error(f"Ошибка уведомления админа: {e}")
 
+        # ========== ПОДТВЕРЖДЕНИЕ ПОКУПАТЕЛЮ ==========
+        try:
+            bot.send_message(
+                user_id,
+                f"✅ *Ваш заказ {order_number} принят!*\n\n"
+                f"📝 *Состав заказа:*\n{items_text}\n\n"
+                f"💳 Оплата: {'Наличные' if payment=='cash' else 'Перевод'}\n"
+                f"🚚 Доставка: {delivery_text}\n"
+                f"📍 Адрес: {address}\n\n"
+                f"📅 Дата: {datetime.now().strftime('%d %B')}\n"
+                f"👤 Username: @{contact.get('username', 'не указан')}\n\n"
+                f"💬 Вы можете общаться с продавцом в этом чате.",
+                parse_mode='Markdown'
+            )
+            logger.info(f"Подтверждение отправлено покупателю {user_id}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки подтверждения покупателю: {e}")
+
+        # Помечаем как уведомлённое
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE orders SET notified_bool = TRUE WHERE id = %s", (order_id,))
