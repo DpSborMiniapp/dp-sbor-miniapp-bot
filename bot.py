@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
 import telebot
@@ -14,6 +15,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 PORT = int(os.getenv('PORT', 10000))
+STOCK_BOT_URL = os.getenv('STOCK_BOT_URL')  # URL нового складского бота
 
 if not BOT_TOKEN or not DATABASE_URL:
     raise ValueError("Не заданы обязательные переменные окружения")
@@ -310,6 +312,19 @@ def handle_seller_complete(call):
     complete_order(order['id'])
     logger.info(f"Заказ {order_num} завершён в БД")
 
+    # ========== Уведомление складского бота ==========
+    if STOCK_BOT_URL:
+        try:
+            requests.post(
+                f"{STOCK_BOT_URL}/api/order-completed",
+                json={'order_number': order_num},
+                timeout=2
+            )
+            logger.info(f"Уведомление складского бота отправлено для заказа {order_num}")
+        except Exception as e:
+            logger.error(f"Ошибка при уведомлении складского бота: {e}")
+    # =================================================
+
     try:
         bot.send_message(
             order['user_id'],
@@ -377,7 +392,6 @@ def new_order():
 
         logger.info(f"Получен запрос на новый заказ: delivery={delivery}, address={address}")
 
-        # Определяем продавца
         if delivery == 'courier':
             seller = get_admin_seller()
             if not seller:
@@ -454,7 +468,6 @@ def new_order():
         else:
             order_number = generate_order_number(seller['name'])
 
-        # Получаем address_id только для самовывоза
         address_id = None
         if delivery == 'pickup':
             with get_db_connection() as conn:
@@ -487,7 +500,6 @@ def new_order():
         order_id = save_order(order_data, contact, request_id)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']})")
 
-        # Отправка уведомлений
         items_text = "\n".join([
             f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
             for item in items
@@ -498,7 +510,6 @@ def new_order():
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
 
-        # Сообщение продавцу (или админу)
         try:
             bot.send_message(
                 seller['telegram_id'],
@@ -514,7 +525,6 @@ def new_order():
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
 
-        # Копия админу, если продавец не админ
         if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
             try:
                 bot.send_message(
@@ -529,7 +539,6 @@ def new_order():
             except Exception as e:
                 logger.error(f"Ошибка уведомления админа: {e}")
 
-        # ========== ПОДТВЕРЖДЕНИЕ ПОКУПАТЕЛЮ ==========
         try:
             bot.send_message(
                 user_id,
@@ -547,7 +556,6 @@ def new_order():
         except Exception as e:
             logger.error(f"Ошибка отправки подтверждения покупателю: {e}")
 
-        # Помечаем как уведомлённое
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE orders SET notified_bool = TRUE WHERE id = %s", (order_id,))
