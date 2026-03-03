@@ -312,7 +312,6 @@ def handle_seller_complete(call):
     complete_order(order['id'])
     logger.info(f"Заказ {order_num} завершён в БД")
 
-    # Уведомление складского бота
     if STOCK_BOT_URL:
         try:
             response = requests.post(
@@ -394,7 +393,6 @@ def new_order():
 
         logger.info(f"Получен запрос на новый заказ: delivery={delivery}, address={address}")
 
-        # Определяем продавца
         if delivery == 'courier':
             seller = get_admin_seller()
             if not seller:
@@ -408,7 +406,6 @@ def new_order():
                 return jsonify({'error': 'Seller not found for this address'}), 404
             logger.info(f"Найден продавец: {seller['name']} (id {seller['id']})")
 
-        # Проверка существующего заказа по request_id
         if request_id:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -426,13 +423,11 @@ def new_order():
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
                         if not existing['notified_bool']:
-                            # Формируем текст с учётом вариантов
                             items_lines = []
                             for item in items:
                                 item_name = f"{item['name']} ({item['variantName']})" if item.get('variantName') else item['name']
                                 items_lines.append(f"• {item_name} x{item['quantity']} = {item['price']*item['quantity']} руб.")
                             items_text = "\n".join(items_lines)
-
                             delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
                             order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
                             markup = types.InlineKeyboardMarkup()
@@ -468,13 +463,11 @@ def new_order():
                             conn.commit()
                         return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
 
-        # Генерация номера для нового заказа
         if delivery == 'courier':
             order_number = generate_order_number("Dоставка")
         else:
             order_number = generate_order_number(seller['name'])
 
-        # Получаем address_id только для самовывоза
         address_id = None
         if delivery == 'pickup':
             with get_db_connection() as conn:
@@ -507,7 +500,6 @@ def new_order():
         order_id = save_order(order_data, contact, request_id)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']})")
 
-        # Формируем текст с учётом вариантов
         items_lines = []
         for item in items:
             item_name = f"{item['name']} ({item['variantName']})" if item.get('variantName') else item['name']
@@ -520,7 +512,6 @@ def new_order():
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
 
-        # Сообщение продавцу (или админу)
         try:
             bot.send_message(
                 seller['telegram_id'],
@@ -536,7 +527,6 @@ def new_order():
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
 
-        # Копия админу, если продавец не админ
         if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
             try:
                 bot.send_message(
@@ -551,7 +541,6 @@ def new_order():
             except Exception as e:
                 logger.error(f"Ошибка уведомления админа: {e}")
 
-        # ========== ПОДТВЕРЖДЕНИЕ ПОКУПАТЕЛЮ ==========
         try:
             bot.send_message(
                 user_id,
@@ -569,7 +558,6 @@ def new_order():
         except Exception as e:
             logger.error(f"Ошибка отправки подтверждения покупателю: {e}")
 
-        # Помечаем как уведомлённое
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE orders SET notified_bool = TRUE WHERE id = %s", (order_id,))
@@ -589,35 +577,44 @@ def order_cancelled():
             return jsonify({'error': 'No data'}), 400
 
         order_id = data.get('orderId')
+        order_number = data.get('orderNumber')
         user_id = data.get('userId')
         seller_id = data.get('sellerId')
 
-        if not all([order_id, seller_id]):
-            logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}")
+        if not all([order_id, seller_id, order_number]):
+            logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}, orderNumber={order_number}")
             return jsonify({'error': 'Missing fields'}), 400
 
+        # Получаем telegram_id продавца
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT order_number FROM orders WHERE id = %s", (order_id,))
-                order = cur.fetchone()
-                if not order:
-                    return jsonify({'error': 'Order not found'}), 404
-
-                order_number = order['order_number']
-
-                cur.execute("SELECT telegram_id FROM sellers WHERE id = %s", (seller_id,))
+                cur.execute("SELECT telegram_id, name FROM sellers WHERE id = %s", (seller_id,))
                 seller = cur.fetchone()
                 if not seller:
                     return jsonify({'error': 'Seller not found'}), 404
-
                 seller_tg = seller['telegram_id']
+                seller_name = seller['name']
 
+        # Отправляем уведомление продавцу
         bot.send_message(
             seller_tg,
             f"❌ *Заказ {order_number} отменён покупателем.*",
             parse_mode='Markdown'
         )
         logger.info(f"Уведомление об отмене заказа {order_number} отправлено продавцу {seller_tg}")
+
+        # Если есть администратор, отправляем копию
+        if ADMIN_ID and seller_tg != ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"❌ *Заказ {order_number} отменён покупателем.*\nПродавец: {seller_name}",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Уведомление об отмене заказа {order_number} отправлено администратору")
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления администратору: {e}")
+
         return jsonify({'status': 'ok'})
 
     except Exception as e:
