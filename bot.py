@@ -393,7 +393,6 @@ def new_order():
 
         logger.info(f"Получен запрос на новый заказ: delivery={delivery}, address={address}")
 
-        # Определяем продавца
         if delivery == 'courier':
             seller = get_admin_seller()
             if not seller:
@@ -407,7 +406,6 @@ def new_order():
                 return jsonify({'error': 'Seller not found for this address'}), 404
             logger.info(f"Найден продавец: {seller['name']} (id {seller['id']})")
 
-        # Проверка существующего заказа по request_id
         if request_id:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -447,7 +445,6 @@ def new_order():
                                     reply_markup=markup
                                 )
                                 logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}, message_id={sent_msg.message_id}")
-                                # Сохраняем координаты сообщения
                                 with get_db_connection() as conn2:
                                     with conn2.cursor() as cur2:
                                         cur2.execute("""
@@ -476,13 +473,11 @@ def new_order():
                             conn.commit()
                         return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
 
-        # Генерация номера для нового заказа
         if delivery == 'courier':
             order_number = generate_order_number("Dоставка")
         else:
             order_number = generate_order_number(seller['name'])
 
-        # Получаем address_id только для самовывоза
         address_id = None
         if delivery == 'pickup':
             with get_db_connection() as conn:
@@ -527,7 +522,6 @@ def new_order():
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
 
-        # Сообщение продавцу (или админу)
         try:
             sent_msg = bot.send_message(
                 seller['telegram_id'],
@@ -540,7 +534,6 @@ def new_order():
                 reply_markup=markup
             )
             logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}, message_id={sent_msg.message_id}")
-            # Сохраняем координаты сообщения
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -553,7 +546,6 @@ def new_order():
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
 
-        # Копия админу, если продавец не админ
         if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
             try:
                 bot.send_message(
@@ -568,7 +560,6 @@ def new_order():
             except Exception as e:
                 logger.error(f"Ошибка уведомления админа: {e}")
 
-        # ========== ПОДТВЕРЖДЕНИЕ ПОКУПАТЕЛЮ ==========
         try:
             bot.send_message(
                 user_id,
@@ -586,7 +577,6 @@ def new_order():
         except Exception as e:
             logger.error(f"Ошибка отправки подтверждения покупателю: {e}")
 
-        # Помечаем как уведомлённое
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE orders SET notified_bool = TRUE WHERE id = %s", (order_id,))
@@ -615,7 +605,6 @@ def order_cancelled():
 
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Получаем информацию о заказе и сохранённых message_id
                 cur.execute("""
                     SELECT order_number, seller_notification_chat_id, seller_notification_message_id
                     FROM orders WHERE id = %s
@@ -628,13 +617,11 @@ def order_cancelled():
                 chat_id = order['seller_notification_chat_id']
                 message_id = order['seller_notification_message_id']
 
-                # Обновляем статус заказа на "Отменен" (если ещё не отменён)
                 cur.execute("""
                     UPDATE orders SET status = 'Отменен' WHERE id = %s AND status = 'Активный'
                 """, (order_id,))
                 conn.commit()
 
-        # Если есть сохранённое сообщение, редактируем его – убираем кнопки и меняем текст
         if chat_id and message_id:
             try:
                 bot.edit_message_reply_markup(
@@ -652,7 +639,6 @@ def order_cancelled():
             except Exception as e:
                 logger.error(f"Не удалось отредактировать сообщение: {e}")
 
-        # Отправляем продавцу отдельное уведомление об отмене
         seller = get_seller_by_id(seller_id)
         if seller:
             try:
