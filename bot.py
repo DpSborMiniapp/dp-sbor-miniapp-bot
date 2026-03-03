@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import requests  # добавлено
 from datetime import datetime
 from flask import Flask, request, jsonify
 import telebot
@@ -14,6 +15,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 PORT = int(os.getenv('PORT', 10000))
+STOCK_BOT_URL = os.getenv('STOCK_BOT_URL')  # добавлено
 
 if not BOT_TOKEN or not DATABASE_URL:
     raise ValueError("Не заданы обязательные переменные окружения")
@@ -310,6 +312,21 @@ def handle_seller_complete(call):
     complete_order(order['id'])
     logger.info(f"Заказ {order_num} завершён в БД")
 
+    # Уведомление складского бота
+    if STOCK_BOT_URL:
+        try:
+            response = requests.post(
+                f"{STOCK_BOT_URL}/api/order-completed",
+                json={"order_number": order_num},
+                timeout=3
+            )
+            if response.ok:
+                logger.info(f"Уведомление о завершении заказа {order_num} отправлено складскому боту")
+            else:
+                logger.error(f"Складской бот вернул ошибку: {response.status_code} - {response.text}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки в складской бот: {e}")
+
     try:
         bot.send_message(
             order['user_id'],
@@ -409,13 +426,10 @@ def new_order():
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
                         if not existing['notified_bool']:
-                            # Формируем текст с учётом вариантов
-                            items_lines = []
-                            for item in items:
-                                item_name = f"{item['name']} ({item['variantName']})" if item.get('variantName') else item['name']
-                                items_lines.append(f"• {item_name} x{item['quantity']} = {item['price']*item['quantity']} руб.")
-                            items_text = "\n".join(items_lines)
-
+                            items_text = "\n".join([
+                                f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
+                                for item in items
+                            ])
                             delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
                             order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
                             markup = types.InlineKeyboardMarkup()
@@ -490,13 +504,11 @@ def new_order():
         order_id = save_order(order_data, contact, request_id)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']})")
 
-        # Формируем текст с учётом вариантов
-        items_lines = []
-        for item in items:
-            item_name = f"{item['name']} ({item['variantName']})" if item.get('variantName') else item['name']
-            items_lines.append(f"• {item_name} x{item['quantity']} = {item['price']*item['quantity']} руб.")
-        items_text = "\n".join(items_lines)
-
+        # Отправка уведомлений
+        items_text = "\n".join([
+            f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
+            for item in items
+        ])
         delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
         order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
 
