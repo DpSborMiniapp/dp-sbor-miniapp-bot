@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import requests  # добавлено
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
 import telebot
@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 PORT = int(os.getenv('PORT', 10000))
-STOCK_BOT_URL = os.getenv('STOCK_BOT_URL')  # добавлено
+STOCK_BOT_URL = os.getenv('STOCK_BOT_URL')
 
 if not BOT_TOKEN or not DATABASE_URL:
     raise ValueError("Не заданы обязательные переменные окружения")
@@ -426,10 +426,13 @@ def new_order():
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
                         if not existing['notified_bool']:
-                            items_text = "\n".join([
-                                f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
-                                for item in items
-                            ])
+                            # Формируем текст с учётом вариантов
+                            items_lines = []
+                            for item in items:
+                                item_name = f"{item['name']} ({item['variantName']})" if item.get('variantName') else item['name']
+                                items_lines.append(f"• {item_name} x{item['quantity']} = {item['price']*item['quantity']} руб.")
+                            items_text = "\n".join(items_lines)
+
                             delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
                             order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
                             markup = types.InlineKeyboardMarkup()
@@ -504,11 +507,13 @@ def new_order():
         order_id = save_order(order_data, contact, request_id)
         logger.info(f"Заказ {order_number} сохранён с ID {order_id} (seller_id={seller['id']})")
 
-        # Отправка уведомлений
-        items_text = "\n".join([
-            f"• {item['name']} x{item['quantity']} = {item['price']*item['quantity']} руб."
-            for item in items
-        ])
+        # Формируем текст с учётом вариантов
+        items_lines = []
+        for item in items:
+            item_name = f"{item['name']} ({item['variantName']})" if item.get('variantName') else item['name']
+            items_lines.append(f"• {item_name} x{item['quantity']} = {item['price']*item['quantity']} руб.")
+        items_text = "\n".join(items_lines)
+
         delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
         order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
 
