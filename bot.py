@@ -188,7 +188,8 @@ def handle_start(message):
     if seller:
         bot.send_message(
             message.chat.id,
-            "👋 Добро пожаловать! Здесь будут ваши заказы и общение с покупателями.",
+            "Здесь будет Ваше общение с продавцом по заказу. Ожидайте сообщение продавца, он в скором времени свяжется с Вами./n 
+            Если продавец долго не связывается, напишите Администратору @dp_sbor_admin ",
             reply_markup=seller_keyboard()
         )
     elif is_admin(user_id):
@@ -200,7 +201,8 @@ def handle_start(message):
     else:
         bot.send_message(
             message.chat.id,
-            "👋 Добро пожаловать! Здесь будет информация о ваших заказах и общение с продавцом."
+            "Здесь будет Ваше общение с продавцом по заказу. Ожидайте сообщение продавца, он в скором времени свяжется с Вами./n 
+            Если продавец долго не связывается, напишите Администратору @dp_sbor_admin "
         )
 
 @bot.message_handler(func=lambda m: m.text == "📋 Мои активные заказы")
@@ -737,3 +739,4 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
+
