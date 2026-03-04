@@ -160,25 +160,52 @@ def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
 def is_admin(telegram_id: int) -> bool:
     return telegram_id == ADMIN_ID
 
-def main_keyboard():
+# ========== Клавиатуры ==========
+def seller_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add(types.KeyboardButton("📋 Мои активные заказы"))
     return keyboard
 
+def admin_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("📋 Мои активные заказы"))
+    return keyboard
+
+# ========== Хэндлеры ==========
 @bot.message_handler(commands=['start'])
 def handle_start(message):
-    bot.send_message(message.chat.id, "👋 Добро пожаловать! Здесь будут ваши заказы и общение с продавцом.", reply_markup=main_keyboard())
+    user_id = message.from_user.id
+    seller = get_seller_by_telegram_id(user_id)
+    if seller:
+        bot.send_message(
+            message.chat.id,
+            "👋 Добро пожаловать! Здесь будут ваши заказы и общение с покупателями.",
+            reply_markup=seller_keyboard()
+        )
+    elif is_admin(user_id):
+        bot.send_message(
+            message.chat.id,
+            "👋 Добро пожаловать в панель администратора!",
+            reply_markup=admin_keyboard()
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "👋 Добро пожаловать! Здесь будет информация о ваших заказах и общение с продавцом."
+        )
 
 @bot.message_handler(func=lambda m: m.text == "📋 Мои активные заказы")
 def handle_my_orders(message):
     user_id = message.from_user.id
-    if is_admin(user_id):
-        bot.reply_to(message, "Вы администратор. Все активные заказы можно отслеживать через уведомления.")
-        return
     seller = get_seller_by_telegram_id(user_id)
-    if not seller:
-        bot.reply_to(message, "Вы не являетесь продавцом.")
+    if not seller and not is_admin(user_id):
+        bot.reply_to(message, "❌ У вас нет доступа к этой функции.")
         return
+
+    if is_admin(user_id):
+        bot.reply_to(message, "Вы администратор. Просмотр активных заказов пока не реализован.")
+        return
+
     orders = get_active_orders_by_seller(seller['id'])
     if orders:
         order_list = "\n".join([f"• #{o['order_number']}" for o in orders])
@@ -215,7 +242,7 @@ def handle_buyer_message(message):
             f"📩 [Копия] Покупатель {order['contact']['name']} (заказ {order['order_number']}):\n{message.text}"
         )
 
-    bot.reply_to(message, "✅ Сообщение отправлено.", reply_markup=main_keyboard())
+    bot.reply_to(message, "✅ Сообщение отправлено.")
 
 @bot.message_handler(func=lambda m: get_seller_by_telegram_id(m.from_user.id) is not None or is_admin(m.from_user.id))
 def handle_seller_message(message):
@@ -224,10 +251,7 @@ def handle_seller_message(message):
     logger.info(f"Сообщение от продавца/админа {user_id}: {text}")
 
     if not text.startswith('#'):
-        if is_admin(user_id):
-            bot.reply_to(message, "Чтобы ответить покупателю, начните сообщение с #номера_заказа, например:\n`#А1 Здравствуйте!`")
-        else:
-            bot.reply_to(message, "Чтобы ответить покупателю, начните сообщение с #номера_заказа, например:\n`#А1 Здравствуйте!`", parse_mode="Markdown")
+        bot.reply_to(message, "Чтобы ответить покупателю, начните сообщение с #номера_заказа, например:\n`#А1 Здравствуйте!`", parse_mode="Markdown")
         return
 
     try:
@@ -271,7 +295,7 @@ def handle_seller_message(message):
             except Exception as e:
                 logger.error(f"Ошибка отправки админу: {e}")
 
-        bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).", reply_markup=main_keyboard())
+        bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).", reply_markup=seller_keyboard())
 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}", exc_info=True)
@@ -356,8 +380,15 @@ def handle_seller_complete(call):
 
 @bot.message_handler(func=lambda m: True)
 def fallback_handler(message):
-    bot.send_message(message.chat.id, "Используйте кнопки или начните новый заказ в нашем мини-аппе.", reply_markup=main_keyboard())
+    user_id = message.from_user.id
+    if get_seller_by_telegram_id(user_id):
+        bot.send_message(message.chat.id, "Используйте кнопки или начните новый заказ в нашем мини-аппе.", reply_markup=seller_keyboard())
+    elif is_admin(user_id):
+        bot.send_message(message.chat.id, "Используйте кнопки администратора.", reply_markup=admin_keyboard())
+    else:
+        bot.send_message(message.chat.id, "Если у вас есть вопросы, напишите продавцу.")
 
+# ========== Flask эндпоинты ==========
 @app.route('/')
 def index():
     return '🤖 Бот работает'
@@ -585,7 +616,6 @@ def order_cancelled():
             logger.error(f"Missing fields: orderId={order_id}, sellerId={seller_id}, orderNumber={order_number}")
             return jsonify({'error': 'Missing fields'}), 400
 
-        # Получаем telegram_id продавца
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT telegram_id, name FROM sellers WHERE id = %s", (seller_id,))
@@ -595,7 +625,6 @@ def order_cancelled():
                 seller_tg = seller['telegram_id']
                 seller_name = seller['name']
 
-        # Отправляем уведомление продавцу
         bot.send_message(
             seller_tg,
             f"❌ *Заказ {order_number} отменён покупателем.*",
@@ -603,7 +632,6 @@ def order_cancelled():
         )
         logger.info(f"Уведомление об отмене заказа {order_number} отправлено продавцу {seller_tg}")
 
-        # Если есть администратор, отправляем копию
         if ADMIN_ID and seller_tg != ADMIN_ID:
             try:
                 bot.send_message(
