@@ -111,6 +111,15 @@ def save_order(order_data: dict, contact: dict, request_id: str = None):
             conn.commit()
             return order_id
 
+def update_order_status(order_id: int, status: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET status = %s WHERE id = %s",
+                (status, order_id)
+            )
+            conn.commit()
+
 def get_active_order_by_buyer(buyer_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -378,6 +387,74 @@ def handle_seller_complete(call):
 
     bot.answer_callback_query(call.id, "✅ Заказ завершён")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
+def handle_cancel_order(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"Пользователь {user_id} нажал отменить для заказа {order_num}")
+
+    order = get_order_by_number(order_num)
+    if not order:
+        logger.error(f"Заказ {order_num} не найден")
+        bot.answer_callback_query(call.id, "❌ Заказ не найден")
+        return
+
+    if not is_admin(user_id):
+        seller = get_seller_by_telegram_id(user_id)
+        if not seller or order['seller_id'] != seller['id']:
+            logger.error(f"Заказ {order_num} не принадлежит пользователю {user_id}")
+            bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
+            return
+
+    if order['status'] not in ('active', 'Активный'):
+        logger.error(f"Заказ {order_num} уже не активен (статус: {order['status']})")
+        bot.answer_callback_query(call.id, f"❌ Заказ уже не активен")
+        try:
+            bot.edit_message_reply_markup(
+                user_id,
+                call.message.message_id,
+                reply_markup=None
+            )
+        except:
+            pass
+        return
+
+    # Меняем статус на "Отменен"
+    update_order_status(order['id'], 'Отменен')
+    logger.info(f"Заказ {order_num} отменён")
+
+    # Убираем кнопки и меняем текст сообщения
+    try:
+        bot.edit_message_text(
+            f"❌ *Заказ {order_num} отменён.*",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отредактировать сообщение: {e}")
+
+    # Уведомляем покупателя
+    try:
+        bot.send_message(
+            order['user_id'],
+            f"❌ *Ваш заказ {order_num} отменён продавцом.*",
+            parse_mode='Markdown'
+        )
+        logger.info(f"Уведомление об отмене отправлено покупателю {order['user_id']}")
+    except Exception as e:
+        logger.error(f"Ошибка уведомления покупателя: {e}")
+
+    # Уведомляем админа, если нужно
+    if ADMIN_ID:
+        completer = "Администратор" if is_admin(user_id) else (seller['name'] if 'seller' in locals() and seller else "Неизвестный продавец")
+        bot.send_message(
+            ADMIN_ID,
+            f"❌ {completer} отменил заказ {order_num}."
+        )
+
+    bot.answer_callback_query(call.id, "✅ Заказ отменён")
+
 @bot.message_handler(func=lambda m: True)
 def fallback_handler(message):
     user_id = message.from_user.id
@@ -461,8 +538,11 @@ def new_order():
                             items_text = "\n".join(items_lines)
                             delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
                             order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
-                            markup = types.InlineKeyboardMarkup()
-                            markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
+                            markup = types.InlineKeyboardMarkup(row_width=2)
+                            markup.add(
+                                types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"),
+                                types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_number}")
+                            )
                             try:
                                 bot.send_message(
                                     seller['telegram_id'],
@@ -540,8 +620,11 @@ def new_order():
         delivery_text = "Самовывоз" if delivery == 'pickup' else "Доставка"
         order_text = f"{items_text}\n\nСумма: {total} руб.\nОплата: {'Наличные' if payment=='cash' else 'Перевод'}\nДоставка: {delivery_text}"
 
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"))
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"),
+            types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_number}")
+        )
 
         try:
             bot.send_message(
