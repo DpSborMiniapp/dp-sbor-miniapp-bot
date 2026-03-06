@@ -272,35 +272,50 @@ def view_order(call):
         logger.error(f"Заказ {order_num} не найден")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
-
-    messages = get_messages_for_order(order['id'])
-
+    logger.info("Заказ получен, приступаем к формированию данных")
+    
+    try:
+        messages = get_messages_for_order(order['id'])
+        logger.info(f"Получено сообщений: {len(messages)}")
+    except Exception as e:
+        logger.exception(f"Ошибка при получении сообщений: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка получения истории")
+        return
+    
     contact = order['contact']
-    items_text = "\n".join([
-        f"• {item['name']} ({item.get('variantName', '')}) x{item['quantity']} = {item['price']*item['quantity']} руб."
-        for item in order['items']
-    ])
-    delivery_text = "Самовывоз" if order.get('delivery_type') == 'pickup' else "Доставка"
-    info = (
-        f"📦 *Заказ {order_num}*\n\n"
-        f"👤 Покупатель: {contact.get('name', 'Неизвестно')}\n"
-        f"📍 Адрес: {contact.get('address', 'Не указан')}\n"
-        f"📞 Телефон: {contact.get('phone', 'Не указан')}\n"
-        f"📱 Username: @{contact.get('username', 'не указан')}\n"
-        f"💳 Оплата: {'Наличные' if contact.get('paymentMethod') == 'cash' else 'Перевод'}\n"
-        f"🚚 Доставка: {delivery_text}\n\n"
-        f"📝 *Состав заказа:*\n{items_text}\n\n"
-        f"💰 *Итого: {order['total']} руб.*\n"
-    )
-
-    if messages:
-        history = "\n".join([
-            f"{'👤 Покупатель' if msg['sender_role']=='buyer' else '🛒 Продавец'} ({msg['created_at'][:16]}): {msg['text']}"
-            for msg in messages
+    logger.info("Формируем текст заказа")
+    try:
+        items_text = "\n".join([
+            f"• {item['name']} ({item.get('variantName', '')}) x{item['quantity']} = {item['price']*item['quantity']} руб."
+            for item in order['items']
         ])
-        info += f"\n💬 *История переписки:*\n{history}"
-    else:
-        info += "\n💬 *История переписки:*\nПока нет сообщений."
+        delivery_text = "Самовывоз" if order.get('delivery_type') == 'pickup' else "Доставка"
+        info = (
+            f"📦 *Заказ {order_num}*\n\n"
+            f"👤 Покупатель: {contact.get('name', 'Неизвестно')}\n"
+            f"📍 Адрес: {contact.get('address', 'Не указан')}\n"
+            f"📞 Телефон: {contact.get('phone', 'Не указан')}\n"
+            f"📱 Username: @{contact.get('username', 'не указан')}\n"
+            f"💳 Оплата: {'Наличные' if contact.get('paymentMethod') == 'cash' else 'Перевод'}\n"
+            f"🚚 Доставка: {delivery_text}\n\n"
+            f"📝 *Состав заказа:*\n{items_text}\n\n"
+            f"💰 *Итого: {order['total']} руб.*\n"
+        )
+        logger.info("Текст заказа сформирован")
+        
+        if messages:
+            history = "\n".join([
+                f"{'👤 Покупатель' if msg['sender_role']=='buyer' else '🛒 Продавец'} ({msg['created_at'][:16]}): {msg['text']}"
+                for msg in messages
+            ])
+            info += f"\n💬 *История переписки:*\n{history}"
+        else:
+            info += "\n💬 *История переписки:*\nПока нет сообщений."
+        logger.info("История переписки добавлена")
+    except Exception as e:
+        logger.exception(f"Ошибка при формировании текста: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка формирования данных")
+        return
 
     markup = types.InlineKeyboardMarkup()
     if order['status'] in ('active', 'Активный'):
@@ -310,14 +325,22 @@ def view_order(call):
         )
     else:
         markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_orders"))
+    logger.info("Клавиатура сформирована")
 
-    bot.edit_message_text(
-        info,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='Markdown',
-        reply_markup=markup
-    )
+    try:
+        bot.edit_message_text(
+            info,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        logger.info("Сообщение успешно отредактировано")
+    except Exception as e:
+        logger.exception(f"Ошибка при редактировании сообщения: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка отправки")
+        return
+
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_orders")
