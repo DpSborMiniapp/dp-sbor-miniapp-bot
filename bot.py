@@ -304,10 +304,13 @@ def view_order(call):
         logger.info("Текст заказа сформирован")
         
         if messages:
-            history = "\n".join([
-                f"{'👤 Покупатель' if msg['sender_role']=='buyer' else '🛒 Продавец'} ({msg['created_at'][:16]}): {msg['text']}"
-                for msg in messages
-            ])
+            history_lines = []
+            for msg in messages:
+                sender = '👤 Покупатель' if msg['sender_role'] == 'buyer' else '🛒 Продавец'
+                # Преобразуем datetime в строку
+                created_str = msg['created_at'].strftime('%Y-%m-%d %H:%M') if msg['created_at'] else ''
+                history_lines.append(f"{sender} ({created_str}): {msg['text']}")
+            history = "\n".join(history_lines)
             info += f"\n💬 *История переписки:*\n{history}"
         else:
             info += "\n💬 *История переписки:*\nПока нет сообщений."
