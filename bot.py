@@ -157,6 +157,17 @@ def complete_order(order_id: int):
                         (datetime.utcnow().isoformat(), order_id))
             conn.commit()
 
+def get_messages_for_order(order_id: int):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT sender_role, text, created_at 
+                FROM messages 
+                WHERE order_id = %s 
+                ORDER BY created_at ASC
+            """, (order_id,))
+            return cur.fetchall()
+
 def save_message(order_id: int, sender_id: int, sender_role: str, text: str):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -184,23 +195,36 @@ def admin_keyboard():
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     user_id = message.from_user.id
+    # Разбираем параметр команды
+    parts = message.text.split()
+    param = parts[1] if len(parts) > 1 else ''
+    
+    # Если параметр начинается с order_, значит это покупатель с заказом
+    if param.startswith('order_'):
+        order_num = param[6:]
+        bot.send_message(
+            user_id,
+            f"✅ Здравствуйте! Ваш заказ №{order_num} оформлен. Здесь вы можете общаться с продавцом и получать уведомления о статусе заказа.\n\nЕсли у вас есть вопросы, просто напишите их в этот чат."
+        )
+        return
+
     seller = get_seller_by_telegram_id(user_id)
     if seller:
         bot.send_message(
-            message.chat.id,
-            "Здесь будет Ваше общение с продавцом по заказу. Ожидайте сообщение продавца, он в скором времени свяжется с Вами.\nЕсли продавец долго не связывается, напишите Администратору @dp_sbor_admin ",
+            user_id,
+            "👋 Добро пожаловать! Здесь будут ваши заказы и общение с покупателями.",
             reply_markup=seller_keyboard()
         )
     elif is_admin(user_id):
         bot.send_message(
-            message.chat.id,
+            user_id,
             "👋 Добро пожаловать в панель администратора!",
             reply_markup=admin_keyboard()
         )
     else:
         bot.send_message(
-            message.chat.id,
-            "Здесь будет Ваше общение с продавцом по заказу. Ожидайте сообщение продавца, он в скором времени свяжется с Вами.\nЕсли продавец долго не связывается, напишите Администратору @dp_sbor_admin "
+            user_id,
+            "👋 Добро пожаловать! Если вы оформили заказ, то здесь будет общение с продавцом."
         )
 
 @bot.message_handler(func=lambda m: m.text == "📋 Мои активные заказы")
@@ -212,15 +236,113 @@ def handle_my_orders(message):
         return
 
     if is_admin(user_id):
+        # Для администратора можно показывать все заказы или отдельную логику
         bot.reply_to(message, "Вы администратор. Просмотр активных заказов пока не реализован.")
         return
 
     orders = get_active_orders_by_seller(seller['id'])
-    if orders:
-        order_list = "\n".join([f"• #{o['order_number']}" for o in orders])
-        bot.reply_to(message, f"📋 *Ваши активные заказы:*\n{order_list}", parse_mode="Markdown")
-    else:
+    if not orders:
         bot.reply_to(message, "У вас нет активных заказов.")
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for order in orders:
+        markup.add(types.InlineKeyboardButton(
+            f"Заказ {order['order_number']}",
+            callback_data=f"view_order_{order['order_number']}"
+        ))
+    bot.send_message(
+        message.chat.id,
+        "📋 *Ваши активные заказы:*\nВыберите заказ для просмотра деталей и истории сообщений.",
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('view_order_'))
+def view_order(call):
+    order_num = call.data.split('_')[2]
+    order = get_order_by_number(order_num)
+    if not order:
+        bot.answer_callback_query(call.id, "❌ Заказ не найден")
+        return
+
+    # Получаем историю сообщений
+    messages = get_messages_for_order(order['id'])
+
+    # Формируем текст с информацией о заказе
+    contact = order['contact']
+    items_text = "\n".join([
+        f"• {item['name']} ({item.get('variantName', '')}) x{item['quantity']} = {item['price']*item['quantity']} руб."
+        for item in order['items']
+    ])
+    delivery_text = "Самовывоз" if order.get('delivery_type') == 'pickup' else "Доставка"
+    info = (
+        f"📦 *Заказ {order_num}*\n\n"
+        f"👤 Покупатель: {contact.get('name', 'Неизвестно')}\n"
+        f"📍 Адрес: {contact.get('address', 'Не указан')}\n"
+        f"📞 Телефон: {contact.get('phone', 'Не указан')}\n"
+        f"📱 Username: @{contact.get('username', 'не указан')}\n"
+        f"💳 Оплата: {'Наличные' if contact.get('paymentMethod') == 'cash' else 'Перевод'}\n"
+        f"🚚 Доставка: {delivery_text}\n\n"
+        f"📝 *Состав заказа:*\n{items_text}\n\n"
+        f"💰 *Итого: {order['total']} руб.*\n"
+    )
+
+    # Добавляем историю сообщений
+    if messages:
+        history = "\n".join([
+            f"{'👤 Покупатель' if msg['sender_role']=='buyer' else '🛒 Продавец'} ({msg['created_at'][:16]}): {msg['text']}"
+            for msg in messages
+        ])
+        info += f"\n💬 *История переписки:*\n{history}"
+    else:
+        info += "\n💬 *История переписки:*\nПока нет сообщений."
+
+    # Кнопки для управления заказом (если он ещё активен)
+    markup = types.InlineKeyboardMarkup()
+    if order['status'] in ('active', 'Активный'):
+        markup.row(
+            types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_num}"),
+            types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_num}")
+        )
+    else:
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_orders"))
+
+    bot.edit_message_text(
+        info,
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_orders")
+def back_to_orders(call):
+    # Возвращаемся к списку заказов
+    user_id = call.from_user.id
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller:
+        bot.answer_callback_query(call.id, "❌ Ошибка доступа")
+        return
+    orders = get_active_orders_by_seller(seller['id'])
+    if not orders:
+        bot.edit_message_text("У вас нет активных заказов.", call.message.chat.id, call.message.message_id)
+        return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for order in orders:
+        markup.add(types.InlineKeyboardButton(
+            f"Заказ {order['order_number']}",
+            callback_data=f"view_order_{order['order_number']}"
+        ))
+    bot.edit_message_text(
+        "📋 *Ваши активные заказы:*\nВыберите заказ для просмотра деталей и истории сообщений.",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: get_active_order_by_buyer(m.from_user.id) is not None)
 def handle_buyer_message(message):
@@ -375,15 +497,16 @@ def handle_seller_complete(call):
             f"✅ {completer} завершил заказ {order_num}."
         )
 
+    # Обновляем сообщение (убираем кнопки или меняем текст)
     try:
-        bot.edit_message_reply_markup(
-            user_id,
+        bot.edit_message_text(
+            f"✅ Заказ {order_num} завершён.",
+            call.message.chat.id,
             call.message.message_id,
-            reply_markup=None
+            parse_mode='Markdown'
         )
-        logger.info(f"Кнопки убраны у пользователя {user_id}")
     except Exception as e:
-        logger.error(f"Не удалось убрать кнопки: {e}")
+        logger.error(f"Не удалось отредактировать сообщение: {e}")
 
     bot.answer_callback_query(call.id, "✅ Заказ завершён")
 
@@ -419,11 +542,9 @@ def handle_cancel_order(call):
             pass
         return
 
-    # Меняем статус на "Отменен"
     update_order_status(order['id'], 'Отменен')
     logger.info(f"Заказ {order_num} отменён")
 
-    # Убираем кнопки и меняем текст сообщения
     try:
         bot.edit_message_text(
             f"❌ *Заказ {order_num} отменён.*",
@@ -434,7 +555,6 @@ def handle_cancel_order(call):
     except Exception as e:
         logger.error(f"Не удалось отредактировать сообщение: {e}")
 
-    # Уведомляем покупателя
     try:
         bot.send_message(
             order['user_id'],
@@ -445,7 +565,6 @@ def handle_cancel_order(call):
     except Exception as e:
         logger.error(f"Ошибка уведомления покупателя: {e}")
 
-    # Уведомляем админа, если нужно
     if ADMIN_ID:
         completer = "Администратор" if is_admin(user_id) else (seller['name'] if 'seller' in locals() and seller else "Неизвестный продавец")
         bot.send_message(
@@ -543,11 +662,16 @@ def new_order():
                                 types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"),
                                 types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_number}")
                             )
+                            # Добавляем телефон и username в сообщение продавцу
+                            phone = contact.get('phone', 'не указан')
+                            username = contact.get('username', 'не указан')
                             try:
                                 bot.send_message(
                                     seller['telegram_id'],
                                     f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
                                     f"👤 Покупатель: {buyer_name}\n"
+                                    f"📞 Телефон: {phone}\n"
+                                    f"📱 Username: @{username}\n"
                                     f"📍 {address}\n"
                                     f"📝 {order_text}\n\n"
                                     f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
@@ -564,6 +688,8 @@ def new_order():
                                         f"🆕 *Новый заказ {order_number}*\n"
                                         f"Продавец: {seller['name']}\n"
                                         f"Покупатель: {buyer_name}\n"
+                                        f"Телефон: {phone}\n"
+                                        f"Username: @{username}\n"
                                         f"Адрес: {address}\n"
                                         f"Сумма: {total} руб.",
                                         parse_mode='Markdown'
@@ -626,11 +752,16 @@ def new_order():
             types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_number}")
         )
 
+        phone = contact.get('phone', 'не указан')
+        username = contact.get('username', 'не указан')
+
         try:
             bot.send_message(
                 seller['telegram_id'],
                 f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
                 f"👤 Покупатель: {buyer_name}\n"
+                f"📞 Телефон: {phone}\n"
+                f"📱 Username: @{username}\n"
                 f"📍 {address}\n"
                 f"📝 {order_text}\n\n"
                 f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
@@ -648,6 +779,8 @@ def new_order():
                     f"🆕 *Новый заказ {order_number}*\n"
                     f"Продавец: {seller['name']}\n"
                     f"Покупатель: {buyer_name}\n"
+                    f"Телефон: {phone}\n"
+                    f"Username: @{username}\n"
                     f"Адрес: {address}\n"
                     f"Сумма: {total} руб.",
                     parse_mode='Markdown'
@@ -664,7 +797,7 @@ def new_order():
                 f"🚚 Доставка: {delivery_text}\n"
                 f"📍 Адрес: {address}\n\n"
                 f"📅 Дата: {datetime.now().strftime('%d %B')}\n"
-                f"👤 Username: @{contact.get('username', 'не указан')}\n\n"
+                f"👤 Username: @{username}\n\n"
                 f"💬 Вы можете общаться с продавцом в этом чате.",
                 parse_mode='Markdown'
             )
@@ -737,6 +870,3 @@ if __name__ == '__main__':
     bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
-
-
-
