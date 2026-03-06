@@ -10,6 +10,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
+# Настраиваем логирование для telebot
+telebot.logger.setLevel(logging.INFO)
+
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -141,6 +144,7 @@ def get_active_orders_by_seller(seller_id: int):
             return orders
 
 def get_order_by_number(order_number: str):
+    logger.info(f"🔍 get_order_by_number: ищем заказ с номером '{order_number}'")
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
@@ -195,11 +199,9 @@ def admin_keyboard():
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     user_id = message.from_user.id
-    # Разбираем параметр команды
     parts = message.text.split()
     param = parts[1] if len(parts) > 1 else ''
     
-    # Если параметр начинается с order_, значит это покупатель с заказом
     if param.startswith('order_'):
         order_num = param[6:]
         bot.send_message(
@@ -229,6 +231,7 @@ def handle_start(message):
 
 @bot.message_handler(func=lambda m: m.text == "📋 Мои активные заказы")
 def handle_my_orders(message):
+    logger.info("handle_my_orders вызван")
     user_id = message.from_user.id
     seller = get_seller_by_telegram_id(user_id)
     if not seller and not is_admin(user_id):
@@ -236,7 +239,6 @@ def handle_my_orders(message):
         return
 
     if is_admin(user_id):
-        # Для администратора можно показывать все заказы или отдельную логику
         bot.reply_to(message, "Вы администратор. Просмотр активных заказов пока не реализован.")
         return
 
@@ -247,9 +249,11 @@ def handle_my_orders(message):
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     for order in orders:
+        callback_data = f"view_order_{order['order_number']}"
+        logger.info(f"Создаём кнопку с callback_data: {callback_data}")
         markup.add(types.InlineKeyboardButton(
             f"Заказ {order['order_number']}",
-            callback_data=f"view_order_{order['order_number']}"
+            callback_data=callback_data
         ))
     bot.send_message(
         message.chat.id,
@@ -260,16 +264,17 @@ def handle_my_orders(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_order_'))
 def view_order(call):
+    logger.info(f"view_order вызван с data: {call.data}")
     order_num = call.data.split('_')[2]
+    logger.info(f"Извлечён номер заказа: {order_num}")
     order = get_order_by_number(order_num)
     if not order:
+        logger.error(f"Заказ {order_num} не найден")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
 
-    # Получаем историю сообщений
     messages = get_messages_for_order(order['id'])
 
-    # Формируем текст с информацией о заказе
     contact = order['contact']
     items_text = "\n".join([
         f"• {item['name']} ({item.get('variantName', '')}) x{item['quantity']} = {item['price']*item['quantity']} руб."
@@ -288,7 +293,6 @@ def view_order(call):
         f"💰 *Итого: {order['total']} руб.*\n"
     )
 
-    # Добавляем историю сообщений
     if messages:
         history = "\n".join([
             f"{'👤 Покупатель' if msg['sender_role']=='buyer' else '🛒 Продавец'} ({msg['created_at'][:16]}): {msg['text']}"
@@ -298,7 +302,6 @@ def view_order(call):
     else:
         info += "\n💬 *История переписки:*\nПока нет сообщений."
 
-    # Кнопки для управления заказом (если он ещё активен)
     markup = types.InlineKeyboardMarkup()
     if order['status'] in ('active', 'Активный'):
         markup.row(
@@ -319,7 +322,7 @@ def view_order(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_orders")
 def back_to_orders(call):
-    # Возвращаемся к списку заказов
+    logger.info("back_to_orders вызван")
     user_id = call.from_user.id
     seller = get_seller_by_telegram_id(user_id)
     if not seller:
@@ -497,7 +500,6 @@ def handle_seller_complete(call):
             f"✅ {completer} завершил заказ {order_num}."
         )
 
-    # Обновляем сообщение (убираем кнопки или меняем текст)
     try:
         bot.edit_message_text(
             f"✅ Заказ {order_num} завершён.",
@@ -662,7 +664,6 @@ def new_order():
                                 types.InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{order_number}"),
                                 types.InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{order_number}")
                             )
-                            # Добавляем телефон и username в сообщение продавцу
                             phone = contact.get('phone', 'не указан')
                             username = contact.get('username', 'не указан')
                             try:
