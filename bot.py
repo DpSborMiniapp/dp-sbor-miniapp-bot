@@ -316,12 +316,16 @@ def view_order(call):
             for item in order['items']
         ])
         delivery_text = "Самовывоз" if order.get('delivery_type') == 'pickup' else "Доставка"
+        
+        # Формируем username без экранирования, просто как текст
+        username_display = f"@{contact.get('username', 'не указан')}"
+        
         info = (
             f"📦 *Заказ {order_num}*\n\n"
             f"👤 Покупатель: {contact.get('name', 'Неизвестно')}\n"
             f"📍 Адрес: {contact.get('address', 'Не указан')}\n"
             f"📞 Телефон: {contact.get('phone', 'Не указан')}\n"
-            f"📱 Username: @{contact.get('username', 'не указан')}\n"
+            f"📱 Username: {username_display}\n"
             f"💳 Оплата: {'Наличные' if contact.get('paymentMethod') == 'cash' else 'Перевод'}\n"
             f"🚚 Доставка: {delivery_text}\n\n"
             f"📝 *Состав заказа:*\n{items_text}\n\n"
@@ -729,13 +733,17 @@ def new_order():
                             )
                             phone = contact.get('phone', 'не указан')
                             username = contact.get('username', 'не указан')
+                            
+                            # Формируем username без экранирования
+                            username_display = f"@{username}" if username else "@не указан"
+                            
                             try:
                                 bot.send_message(
                                     seller['telegram_id'],
                                     f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
                                     f"👤 Покупатель: {buyer_name}\n"
                                     f"📞 Телефон: {phone}\n"
-                                    f"📱 Username: @{username}\n"
+                                    f"📱 Username: {username_display}\n"
                                     f"📍 {address}\n"
                                     f"📝 {order_text}\n\n"
                                     f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
@@ -753,7 +761,7 @@ def new_order():
                                         f"Продавец: {seller['name']}\n"
                                         f"Покупатель: {buyer_name}\n"
                                         f"Телефон: {phone}\n"
-                                        f"Username: @{username}\n"
+                                        f"Username: {username_display}\n"
                                         f"Адрес: {address}\n"
                                         f"Сумма: {total} руб.",
                                         parse_mode='Markdown'
@@ -823,6 +831,7 @@ def new_order():
 
         phone = contact.get('phone', 'не указан')
         username = contact.get('username', 'не указан')
+        username_display = f"@{username}" if username else "@не указан"
 
         try:
             bot.send_message(
@@ -830,7 +839,7 @@ def new_order():
                 f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
                 f"👤 Покупатель: {buyer_name}\n"
                 f"📞 Телефон: {phone}\n"
-                f"📱 Username: @{username}\n"
+                f"📱 Username: {username_display}\n"
                 f"📍 {address}\n"
                 f"📝 {order_text}\n\n"
                 f"💬 Чтобы ответить покупателю, используйте `#{order_number} текст`",
@@ -850,7 +859,7 @@ def new_order():
                     f"Продавец: {seller['name']}\n"
                     f"Покупатель: {buyer_name}\n"
                     f"Телефон: {phone}\n"
-                    f"Username: @{username}\n"
+                    f"Username: {username_display}\n"
                     f"Адрес: {address}\n"
                     f"Сумма: {total} руб.",
                     parse_mode='Markdown'
@@ -868,7 +877,7 @@ def new_order():
                 f"🚚 Доставка: {delivery_text}\n"
                 f"📍 Адрес: {address}\n\n"
                 f"📅 Дата: {datetime.now().strftime('%d %B')}\n"
-                f"👤 Username: @{username}\n\n"
+                f"👤 Username: {username_display}\n\n"
                 f"💬 Вы можете общаться с продавцом в этом чате.",
                 parse_mode='Markdown'
             )
