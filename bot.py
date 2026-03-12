@@ -263,14 +263,57 @@ def handle_my_orders(message):
     logger.info("handle_my_orders вызван")
     user_id = message.from_user.id
     seller = get_seller_by_telegram_id(user_id)
+    
+    # Если пользователь не продавец и не админ - отказываем
     if not seller and not is_admin(user_id):
         bot.reply_to(message, "❌ У вас нет доступа к этой функции.")
         return
 
+    # Для администратора показываем ВСЕ активные заказы
     if is_admin(user_id):
-        bot.reply_to(message, "Вы администратор. Просмотр активных заказов пока не реализован.")
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM orders 
+                    WHERE status IN ('active', 'Активный') 
+                    ORDER BY id DESC
+                """)
+                orders = cur.fetchall()
+                for o in orders:
+                    o['contact'] = parse_contact(o['contact'])
+                    o['items'] = parse_items(o['items'])
+        
+        if not orders:
+            bot.reply_to(message, "Нет активных заказов.")
+            return
+            
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for order in orders:
+            # Получаем имя продавца для отображения в кнопке
+            seller_name = "Неизвестный"
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT name FROM sellers WHERE id = %s", (order['seller_id'],))
+                    s = cur.fetchone()
+                    if s:
+                        seller_name = s['name']
+            
+            # В кнопке показываем номер заказа и имя продавца
+            callback_data = f"view_order_{order['order_number']}"
+            markup.add(types.InlineKeyboardButton(
+                f"Заказ {order['order_number']} ({seller_name})",
+                callback_data=callback_data
+            ))
+        
+        bot.send_message(
+            message.chat.id,
+            "📋 *Все активные заказы:*\nВыберите заказ для просмотра деталей и истории сообщений.",
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
         return
 
+    # Для обычного продавца показываем только его заказы
     orders = get_active_orders_by_seller(seller['id'])
     if not orders:
         bot.reply_to(message, "У вас нет активных заказов.")
@@ -293,14 +336,23 @@ def handle_my_orders(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_order_'))
 def view_order(call):
-    logger.info(f"view_order вызван с data: {call.data}")
+    user_id = call.from_user.id
     order_num = call.data.split('_')[2]
-    logger.info(f"Извлечён номер заказа: {order_num}")
+    logger.info(f"view_order вызван для заказа {order_num} пользователем {user_id}")
+    
     order = get_order_by_number(order_num)
     if not order:
         logger.error(f"Заказ {order_num} не найден")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
+    
+    # Проверяем права: админ может смотреть любой заказ, продавец только свой
+    if not is_admin(user_id):
+        seller = get_seller_by_telegram_id(user_id)
+        if not seller or order['seller_id'] != seller['id']:
+            bot.answer_callback_query(call.id, "❌ У вас нет прав для просмотра этого заказа")
+            return
+    
     logger.info("Заказ получен, приступаем к формированию данных")
     
     try:
@@ -382,27 +434,74 @@ def view_order(call):
 def back_to_orders(call):
     logger.info("back_to_orders вызван")
     user_id = call.from_user.id
-    seller = get_seller_by_telegram_id(user_id)
-    if not seller:
-        bot.answer_callback_query(call.id, "❌ Ошибка доступа")
-        return
-    orders = get_active_orders_by_seller(seller['id'])
-    if not orders:
-        bot.edit_message_text("У вас нет активных заказов.", call.message.chat.id, call.message.message_id)
-        return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for order in orders:
-        markup.add(types.InlineKeyboardButton(
-            f"Заказ {order['order_number']}",
-            callback_data=f"view_order_{order['order_number']}"
-        ))
-    bot.edit_message_text(
-        "📋 *Ваши активные заказы:*\nВыберите заказ для просмотра деталей и истории сообщений.",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode='Markdown',
-        reply_markup=markup
-    )
+    
+    if is_admin(user_id):
+        # Для админа показываем все заказы
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM orders 
+                    WHERE status IN ('active', 'Активный') 
+                    ORDER BY id DESC
+                """)
+                orders = cur.fetchall()
+                for o in orders:
+                    o['contact'] = parse_contact(o['contact'])
+                    o['items'] = parse_items(o['items'])
+        
+        if not orders:
+            bot.edit_message_text("Нет активных заказов.", call.message.chat.id, call.message.message_id)
+            return
+            
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for order in orders:
+            seller_name = "Неизвестный"
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT name FROM sellers WHERE id = %s", (order['seller_id'],))
+                    s = cur.fetchone()
+                    if s:
+                        seller_name = s['name']
+            
+            markup.add(types.InlineKeyboardButton(
+                f"Заказ {order['order_number']} ({seller_name})",
+                callback_data=f"view_order_{order['order_number']}"
+            ))
+        
+        bot.edit_message_text(
+            "📋 *Все активные заказы:*\nВыберите заказ для просмотра деталей и истории сообщений.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+    else:
+        # Для продавца показываем только его заказы
+        seller = get_seller_by_telegram_id(user_id)
+        if not seller:
+            bot.answer_callback_query(call.id, "❌ Ошибка доступа")
+            return
+            
+        orders = get_active_orders_by_seller(seller['id'])
+        if not orders:
+            bot.edit_message_text("У вас нет активных заказов.", call.message.chat.id, call.message.message_id)
+            return
+            
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for order in orders:
+            markup.add(types.InlineKeyboardButton(
+                f"Заказ {order['order_number']}",
+                callback_data=f"view_order_{order['order_number']}"
+            ))
+        
+        bot.edit_message_text(
+            "📋 *Ваши активные заказы:*\nВыберите заказ для просмотра деталей и истории сообщений.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+    
     bot.answer_callback_query(call.id)
 
 # Обработчик сообщений от покупателей – только если нет символа # в начале
@@ -451,7 +550,7 @@ def handle_buyer_message(message):
 def handle_seller_message(message):
     user_id = message.from_user.id
     text = message.text.strip()
-    logger.info(f"Сообщение от продавца/админа {user_id}: {text}")
+    logger.info(f"Сообщение от пользователя {user_id}: {text}")
 
     try:
         parts = text[1:].split(' ', 1)
@@ -466,14 +565,20 @@ def handle_seller_message(message):
             bot.reply_to(message, f"❌ Заказ {order_num} не найден.")
             return
 
+        # Проверка прав:
+        # - Админ может отвечать на любой заказ
+        # - Продавец только на свои
         if not is_admin(user_id):
             seller = get_seller_by_telegram_id(user_id)
             if not seller or order['seller_id'] != seller['id']:
                 bot.reply_to(message, "❌ Этот заказ не ваш.")
                 return
 
-        save_message(order['id'], user_id, 'seller' if not is_admin(user_id) else 'admin', reply_text)
-        logger.info(f"Сообщение от {('админа' if is_admin(user_id) else 'продавца')} сохранено для заказа {order_num}")
+        # Определяем роль отправителя
+        sender_role = 'admin' if is_admin(user_id) else 'seller'
+        
+        save_message(order['id'], user_id, sender_role, reply_text)
+        logger.info(f"Сообщение от {sender_role} сохранено для заказа {order_num}")
 
         try:
             buyer_id = order['user_id']
@@ -486,6 +591,7 @@ def handle_seller_message(message):
         except Exception as e:
             logger.error(f"Ошибка отправки покупателю {buyer_id}: {e}")
 
+        # Отправляем копию админу, если отвечал не админ
         if ADMIN_ID and not is_admin(user_id):
             seller_name = seller['name'] if 'seller' in locals() and seller else "Неизвестный продавец"
             try:
@@ -496,7 +602,8 @@ def handle_seller_message(message):
             except Exception as e:
                 logger.error(f"Ошибка отправки админу: {e}")
 
-        bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).", reply_markup=seller_keyboard())
+        bot.reply_to(message, f"✅ Сообщение отправлено покупателю (заказ {order_num}).", 
+                    reply_markup=admin_keyboard() if is_admin(user_id) else seller_keyboard())
 
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}", exc_info=True)
