@@ -765,7 +765,7 @@ def new_order():
                             except Exception as e:
                                 logger.error(f"❌ Ошибка уведомления продавца {seller['telegram_id']}: {e}")
                             
-                            # Отправляем копию админу, если продавец не админ
+                            # Отправляем копию админу с составом заказа
                             if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
                                 try:
                                     bot.send_message(
@@ -773,13 +773,14 @@ def new_order():
                                         f"🆕 *Новый заказ {order_number}*\n"
                                         f"Продавец: {seller['name']}\n"
                                         f"Покупатель: {buyer_name}\n"
-                                        f"Телефон: {phone}\n"
-                                        f"Username: {username_display}\n"
-                                        f"Адрес: {address}\n"
-                                        f"Сумма: {total} руб.",
+                                        f"📞 Телефон: {phone}\n"
+                                        f"📱 Username: {username_display}\n"
+                                        f"📍 Адрес: {address}\n\n"
+                                        f"📦 *Состав заказа:*\n{items_text}\n\n"
+                                        f"💰 *Сумма: {total} руб.*",
                                         parse_mode='Markdown'
                                     )
-                                    logger.info(f"✅ Копия заказа отправлена админу {ADMIN_ID}")
+                                    logger.info(f"✅ Уведомление админу отправлено с составом заказа")
                                 except Exception as e:
                                     logger.error(f"❌ Ошибка уведомления админа: {e}")
                             
@@ -865,7 +866,7 @@ def new_order():
         except Exception as e:
             logger.error(f"❌ Ошибка уведомления продавца {seller['telegram_id']}: {e}")
 
-        # Копия админу, если продавец не админ
+        # Копия админу с составом заказа
         if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
             try:
                 bot.send_message(
@@ -873,13 +874,14 @@ def new_order():
                     f"🆕 *Новый заказ {order_number}*\n"
                     f"Продавец: {seller['name']}\n"
                     f"Покупатель: {buyer_name}\n"
-                    f"Телефон: {phone}\n"
-                    f"Username: {username_display}\n"
-                    f"Адрес: {address}\n"
-                    f"Сумма: {total} руб.",
+                    f"📞 Телефон: {phone}\n"
+                    f"📱 Username: {username_display}\n"
+                    f"📍 Адрес: {address}\n\n"
+                    f"📦 *Состав заказа:*\n{items_text}\n\n"
+                    f"💰 *Сумма: {total} руб.*",
                     parse_mode='Markdown'
                 )
-                logger.info(f"✅ Копия заказа отправлена админу {ADMIN_ID}")
+                logger.info(f"✅ Уведомление админу отправлено с составом заказа")
             except Exception as e:
                 logger.error(f"❌ Ошибка уведомления админа: {e}")
 
