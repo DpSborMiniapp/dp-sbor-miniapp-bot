@@ -69,7 +69,10 @@ def get_seller_by_telegram_id(telegram_id: int):
             return cur.fetchone()
 
 def get_admin_seller():
-    return get_seller_by_telegram_id(ADMIN_ID)
+    """Возвращает запись продавца-администратора по ADMIN_ID"""
+    seller = get_seller_by_telegram_id(ADMIN_ID)
+    logger.info(f"get_admin_seller() вызван, ADMIN_ID={ADMIN_ID}, результат: {seller}")
+    return seller
 
 def generate_order_number(seller_id: int) -> str:
     """Генерирует номер заказа на основе префикса продавца (макс. 3 символа)"""
@@ -688,17 +691,25 @@ def new_order():
 
         # Определяем продавца
         if delivery == 'courier':
+            # Для доставки используем администратора
             seller = get_admin_seller()
+            logger.info(f"get_admin_seller() вернул: {seller}")
+            
             if not seller:
                 logger.error("Администратор не найден в таблице sellers")
                 return jsonify({'error': 'Admin seller not found'}), 500
-            logger.info(f"Заказ с доставкой, назначен админ (id {seller['id']})")
+            
+            logger.info(f"Заказ с доставкой, назначен админ: id={seller['id']}, name={seller['name']}, tg={seller['telegram_id']}")
+            
+            # Проверяем, что telegram_id совпадает с ADMIN_ID
+            if seller['telegram_id'] != ADMIN_ID:
+                logger.warning(f"telegram_id продавца ({seller['telegram_id']}) не совпадает с ADMIN_ID ({ADMIN_ID})")
         else:
             seller = get_seller_by_address(address)
             if not seller:
                 logger.error(f"Не найден продавец для адреса {address}")
                 return jsonify({'error': 'Seller not found for this address'}), 404
-            logger.info(f"Найден продавец: {seller['name']} (id {seller['id']})")
+            logger.info(f"Найден продавец: {seller['name']} (id {seller['id']}, tg={seller['telegram_id']})")
 
         if request_id:
             with get_db_connection() as conn:
@@ -710,8 +721,8 @@ def new_order():
                         order_number = existing['order_number']
                         if not order_number:
                             if delivery == 'courier':
-                                # Для доставки используем префикс администратора (seller_id = 6)
-                                order_number = generate_order_number(6)
+                                # Для доставки используем ID администратора
+                                order_number = generate_order_number(seller['id'])
                             else:
                                 # Для самовывоза используем ID продавца
                                 order_number = generate_order_number(seller['id'])
@@ -750,9 +761,11 @@ def new_order():
                                     parse_mode='Markdown',
                                     reply_markup=markup
                                 )
-                                logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}")
+                                logger.info(f"✅ Уведомление успешно отправлено продавцу {seller['telegram_id']}")
                             except Exception as e:
-                                logger.error(f"Ошибка уведомления продавца: {e}")
+                                logger.error(f"❌ Ошибка уведомления продавца {seller['telegram_id']}: {e}")
+                            
+                            # Отправляем копию админу, если продавец не админ
                             if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
                                 try:
                                     bot.send_message(
@@ -766,16 +779,18 @@ def new_order():
                                         f"Сумма: {total} руб.",
                                         parse_mode='Markdown'
                                     )
+                                    logger.info(f"✅ Копия заказа отправлена админу {ADMIN_ID}")
                                 except Exception as e:
-                                    logger.error(f"Ошибка уведомления админа: {e}")
+                                    logger.error(f"❌ Ошибка уведомления админа: {e}")
+                            
                             cur.execute("UPDATE orders SET notified_bool = TRUE WHERE id = %s", (existing['id'],))
                             conn.commit()
                         return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
 
         # Генерация номера для нового заказа
         if delivery == 'courier':
-            # Для доставки используем префикс администратора (seller_id = 6)
-            order_number = generate_order_number(6)
+            # Для доставки используем ID администратора
+            order_number = generate_order_number(seller['id'])
         else:
             # Для самовывоза используем ID продавца
             order_number = generate_order_number(seller['id'])
@@ -846,9 +861,9 @@ def new_order():
                 parse_mode='Markdown',
                 reply_markup=markup
             )
-            logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}")
+            logger.info(f"✅ Уведомление успешно отправлено продавцу {seller['telegram_id']}")
         except Exception as e:
-            logger.error(f"Ошибка уведомления продавца: {e}")
+            logger.error(f"❌ Ошибка уведомления продавца {seller['telegram_id']}: {e}")
 
         # Копия админу, если продавец не админ
         if ADMIN_ID and seller['telegram_id'] != ADMIN_ID:
@@ -864,8 +879,9 @@ def new_order():
                     f"Сумма: {total} руб.",
                     parse_mode='Markdown'
                 )
+                logger.info(f"✅ Копия заказа отправлена админу {ADMIN_ID}")
             except Exception as e:
-                logger.error(f"Ошибка уведомления админа: {e}")
+                logger.error(f"❌ Ошибка уведомления админа: {e}")
 
         # ========== ПОДТВЕРЖДЕНИЕ ПОКУПАТЕЛЮ ==========
         try:
@@ -881,9 +897,9 @@ def new_order():
                 f"💬 Вы можете общаться с продавцом в этом чате.",
                 parse_mode='Markdown'
             )
-            logger.info(f"Подтверждение отправлено покупателю {user_id}")
+            logger.info(f"✅ Подтверждение отправлено покупателю {user_id}")
         except Exception as e:
-            logger.error(f"Ошибка отправки подтверждения покупателю: {e}")
+            logger.error(f"❌ Ошибка отправки подтверждения покупателю {user_id}: {e}")
 
         # Помечаем как уведомлённое
         with get_db_connection() as conn:
@@ -894,7 +910,7 @@ def new_order():
         return jsonify({'status': 'ok', 'orderNumber': order_number})
 
     except Exception as e:
-        logger.exception("Ошибка в /api/new-order")
+        logger.exception("❌ Ошибка в /api/new-order")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/order-cancelled', methods=['POST'])
