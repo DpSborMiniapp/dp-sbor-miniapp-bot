@@ -84,30 +84,36 @@ def get_admin_seller():
     logger.info(f"get_admin_seller() вызван, ADMIN_ID={ADMIN_ID}, результат: {seller}")
     return seller
 
-def generate_order_number(seller_id: int) -> str:
-    """Генерирует номер заказа на основе префикса продавца (макс. 3 символа)"""
+def generate_order_number(seller_id: int, delivery_type: str = None) -> str:
+    """Генерирует номер заказа.
+    Если это доставка (courier) - используем префикс 'D'.
+    Если самовывоз - используем префикс продавца (A, U, E, T, R, J и т.д.).
+    """
+    # Если это доставка, всегда возвращаем D + номер
+    if delivery_type == 'courier':
+        prefix = 'D'
+    else:
+        # Для самовывоза - берем префикс продавца
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT seller_prefix FROM sellers WHERE id = %s", (seller_id,))
+                result = cur.fetchone()
+                
+                if not result or not result['seller_prefix']:
+                    # Если префикс не задан, используем первую букву имени
+                    cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
+                    name = cur.fetchone()['name']
+                    prefix = name[0].upper()
+                else:
+                    prefix = result['seller_prefix']
+    
+    # Обрезаем до 3 символов, если нужно
+    if len(prefix) > 3:
+        prefix = prefix[:3]
+    
+    # Получаем последний номер для этого префикса
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Получаем префикс продавца
-            cur.execute("SELECT seller_prefix FROM sellers WHERE id = %s", (seller_id,))
-            result = cur.fetchone()
-            
-            if not result or not result['seller_prefix']:
-                # Если префикс не задан, используем первую букву имени
-                cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
-                name = cur.fetchone()['name']
-                # Берём первый символ имени (может быть кириллица)
-                prefix = name[0].upper()
-                # Ограничиваем до 3 символов
-                if len(prefix) > 3:
-                    prefix = prefix[:3]
-            else:
-                prefix = result['seller_prefix']
-                # Убеждаемся, что префикс не длиннее 3 символов
-                if len(prefix) > 3:
-                    prefix = prefix[:3]
-            
-            # Получаем последний номер для этого префикса
             cur.execute("""
                 SELECT order_number FROM orders 
                 WHERE order_number LIKE %s 
@@ -116,7 +122,6 @@ def generate_order_number(seller_id: int) -> str:
             
             last = cur.fetchone()
             if last:
-                # Извлекаем числовую часть (всё после префикса)
                 num_str = last['order_number'][len(prefix):]
                 if num_str.isdigit():
                     new_num = int(num_str) + 1
@@ -845,12 +850,8 @@ def new_order():
                         logger.info(f"Найден существующий заказ с request_id {request_id}")
                         order_number = existing['order_number']
                         if not order_number:
-                            if delivery == 'courier':
-                                # Для доставки используем ID администратора
-                                order_number = generate_order_number(seller['id'])
-                            else:
-                                # Для самовывоза используем ID продавца
-                                order_number = generate_order_number(seller['id'])
+                            # Генерируем номер с учётом типа доставки
+                            order_number = generate_order_number(seller['id'], delivery)
                             cur.execute("UPDATE orders SET order_number = %s WHERE id = %s", (order_number, existing['id']))
                             conn.commit()
                             logger.info(f"Обновлён заказ {existing['id']} с новым номером {order_number}")
@@ -917,13 +918,8 @@ def new_order():
                             conn.commit()
                         return jsonify({'status': 'ok', 'orderNumber': order_number}), 200
 
-        # Генерация номера для нового заказа
-        if delivery == 'courier':
-            # Для доставки используем ID администратора
-            order_number = generate_order_number(seller['id'])
-        else:
-            # Для самовывоза используем ID продавца
-            order_number = generate_order_number(seller['id'])
+        # Генерация номера для нового заказа с учётом типа доставки
+        order_number = generate_order_number(seller['id'], delivery)
 
         # Получаем address_id только для самовывоза
         address_id = None
