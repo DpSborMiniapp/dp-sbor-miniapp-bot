@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dp-sbor-miniapp-bot.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
+def escape_markdown(text):
+    """Экранирует специальные символы Markdown"""
+    if not text:
+        return text
+    # Символы, которые нужно экранировать: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, '\\' + char)
+    return text
+
 def parse_contact(contact_json):
     if isinstance(contact_json, dict):
         return contact_json
@@ -372,14 +382,20 @@ def view_order(call):
         ])
         delivery_text = "Самовывоз" if order.get('delivery_type') == 'pickup' else "Доставка"
         
-        # Формируем username без экранирования, просто как текст
-        username_display = f"@{contact.get('username', 'не указан')}"
+        # Экранируем специальные символы
+        username_raw = contact.get('username', 'не указан')
+        username_escaped = escape_markdown(username_raw)
+        username_display = f"@{username_escaped}" if username_raw != 'не указан' else "@не указан"
+        
+        name_escaped = escape_markdown(contact.get('name', 'Неизвестно'))
+        address_escaped = escape_markdown(contact.get('address', 'Не указан'))
+        phone_escaped = escape_markdown(contact.get('phone', 'Не указан'))
         
         info = (
             f"📦 *Заказ {order_num}*\n\n"
-            f"👤 Покупатель: {contact.get('name', 'Неизвестно')}\n"
-            f"📍 Адрес: {contact.get('address', 'Не указан')}\n"
-            f"📞 Телефон: {contact.get('phone', 'Не указан')}\n"
+            f"👤 Покупатель: {name_escaped}\n"
+            f"📍 Адрес: {address_escaped}\n"
+            f"📞 Телефон: {phone_escaped}\n"
             f"📱 Username: {username_display}\n"
             f"💳 Оплата: {'Наличные' if contact.get('paymentMethod') == 'cash' else 'Перевод'}\n"
             f"🚚 Доставка: {delivery_text}\n\n"
@@ -392,8 +408,10 @@ def view_order(call):
             history_lines = []
             for msg in messages:
                 sender = '👤 Покупатель' if msg['sender_role'] == 'buyer' else '🛒 Продавец'
+                # Экранируем текст сообщения
+                msg_text_escaped = escape_markdown(msg['text'])
                 created_str = msg['created_at'].strftime('%Y-%m-%d %H:%M') if msg['created_at'] else ''
-                history_lines.append(f"{sender} ({created_str}): {msg['text']}")
+                history_lines.append(f"{sender} ({created_str}): {msg_text_escaped}")
             history = "\n".join(history_lines)
             info += f"\n💬 *История переписки:*\n{history}"
         else:
@@ -852,14 +870,18 @@ def new_order():
                             phone = contact.get('phone', 'не указан')
                             username = contact.get('username', 'не указан')
                             
-                            # Формируем username без экранирования
-                            username_display = f"@{username}" if username else "@не указан"
+                            # Формируем username с экранированием
+                            username_escaped = escape_markdown(username) if username else ''
+                            username_display = f"@{username_escaped}" if username else "@не указан"
+                            
+                            # Экранируем имя покупателя
+                            buyer_name_escaped = escape_markdown(buyer_name)
                             
                             try:
                                 bot.send_message(
                                     seller['telegram_id'],
                                     f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
-                                    f"👤 Покупатель: {buyer_name}\n"
+                                    f"👤 Покупатель: {buyer_name_escaped}\n"
                                     f"📞 Телефон: {phone}\n"
                                     f"📱 Username: {username_display}\n"
                                     f"📍 {address}\n"
@@ -879,7 +901,7 @@ def new_order():
                                         ADMIN_ID,
                                         f"🆕 *Новый заказ {order_number}*\n"
                                         f"Продавец: {seller['name']}\n"
-                                        f"Покупатель: {buyer_name}\n"
+                                        f"Покупатель: {buyer_name_escaped}\n"
                                         f"📞 Телефон: {phone}\n"
                                         f"📱 Username: {username_display}\n"
                                         f"📍 Адрес: {address}\n\n"
@@ -954,13 +976,17 @@ def new_order():
 
         phone = contact.get('phone', 'не указан')
         username = contact.get('username', 'не указан')
-        username_display = f"@{username}" if username else "@не указан"
+        
+        # Экранируем специальные символы
+        username_escaped = escape_markdown(username) if username else ''
+        username_display = f"@{username_escaped}" if username else "@не указан"
+        buyer_name_escaped = escape_markdown(buyer_name)
 
         try:
             bot.send_message(
                 seller['telegram_id'],
                 f"📦 *НОВЫЙ ЗАКАЗ {order_number}*\n\n"
-                f"👤 Покупатель: {buyer_name}\n"
+                f"👤 Покупатель: {buyer_name_escaped}\n"
                 f"📞 Телефон: {phone}\n"
                 f"📱 Username: {username_display}\n"
                 f"📍 {address}\n"
@@ -980,7 +1006,7 @@ def new_order():
                     ADMIN_ID,
                     f"🆕 *Новый заказ {order_number}*\n"
                     f"Продавец: {seller['name']}\n"
-                    f"Покупатель: {buyer_name}\n"
+                    f"Покупатель: {buyer_name_escaped}\n"
                     f"📞 Телефон: {phone}\n"
                     f"📱 Username: {username_display}\n"
                     f"📍 Адрес: {address}\n\n"
